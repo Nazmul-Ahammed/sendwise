@@ -1,0 +1,8 @@
+FROM node:22
+ENV PATH="/workspace/node_modules/.bin:$PATH"
+WORKDIR /workspace
+COPY . /workspace
+WORKDIR /workspace
+RUN printf '[openship-build] step=install status=running\n' && export CI='true' DEBIAN_FRONTEND='noninteractive' NG_CLI_ANALYTICS='false' NEXT_TELEMETRY_DISABLED='1' NUXT_TELEMETRY_DISABLED='1' ASTRO_TELEMETRY_DISABLED='1' GATSBY_TELEMETRY_DISABLED='1' DO_NOT_TRACK='1' NPM_CONFIG_UPDATE_NOTIFIER='false' NPM_CONFIG_AUDIT='false' NPM_CONFIG_FUND='false' YARN_ENABLE_TELEMETRY='0' PNPM_NO_UPDATE_NOTIFIER='true' GIT_TERMINAL_PROMPT='0' NEXT_PUBLIC_API_URL='https://sendwise.ibos.agency' NO_COLOR='1' && npm i --force && printf '[openship-build] step=install status=completed\n' && printf '[openship-build] step=build status=running\n' && export CI='true' DEBIAN_FRONTEND='noninteractive' NG_CLI_ANALYTICS='false' NEXT_TELEMETRY_DISABLED='1' NUXT_TELEMETRY_DISABLED='1' ASTRO_TELEMETRY_DISABLED='1' GATSBY_TELEMETRY_DISABLED='1' DO_NOT_TRACK='1' NPM_CONFIG_UPDATE_NOTIFIER='false' NPM_CONFIG_AUDIT='false' NPM_CONFIG_FUND='false' YARN_ENABLE_TELEMETRY='0' PNPM_NO_UPDATE_NOTIFIER='true' GIT_TERMINAL_PROMPT='0' NEXT_PUBLIC_API_URL='https://sendwise.ibos.agency' NO_COLOR='1' && npm run build && printf '[openship-build] step=build status=completed\n'
+EXPOSE 3000
+CMD ["sh", "-c", "npm run start"]

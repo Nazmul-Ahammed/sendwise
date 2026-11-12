@@ -1,0 +1,7 @@
+.env
+.venv
+__pycache__
+*.pyc
+verify_api.py
+verify_v2.py
+sync_mailchimp.py

@@ -1,0 +1,21 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0.43
+psycopg[binary]>=3.2
+pydantic>=2.10
+python-dotenv>=1.0
+mangum>=0.17
+cryptography>=43.0
+mcp>=1.9,<2
+# pytrends + pandas are intentionally NOT installed. They are only used by the
+# optional Google Trends connector (imported lazily inside trend_intelligence),
+# and their wheels (pandas 12.7 MB, numpy ~16 MB, lxml ~5 MB) repeatedly timed out
+# inside the container build. The connector degrades with a clear
+# "connector unavailable" error instead of failing the whole app build.
+urllib3<2
+
+# Test runner. Listed here, not in a separate dev file, because the deployment only
+# installs this file: without pytest in the image the suite cannot run in the
+# container at all, and tests that cannot run stop being run. That is how the
+# image-proxy open bug reached production unnoticed.
+pytest>=8.0
