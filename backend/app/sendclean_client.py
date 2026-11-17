@@ -10,6 +10,8 @@ import os
 import urllib.error
 import urllib.request
 
+from .sending_policy import require_message_allowed
+
 
 DEFAULT_BASE_URL = "https://api.sendclean.net/v1.0"
 
@@ -59,6 +61,7 @@ def account(owner_id, token):
 
 
 def send_mail(owner_id, token, smtp_user_name, message):
+    require_message_allowed(message)
     if not str(smtp_user_name or "").strip():
         raise SendCleanError("SendClean SMTP username is required")
     return _request(
@@ -70,6 +73,7 @@ def send_mail(owner_id, token, smtp_user_name, message):
 
 
 def send_template(owner_id, token, smtp_user_name, message):
+    require_message_allowed(message)
     if not str(smtp_user_name or "").strip():
         raise SendCleanError("SendClean SMTP username is required")
     return _request(

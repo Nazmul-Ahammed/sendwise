@@ -91,6 +91,22 @@ class SequenceQueueTests(unittest.TestCase):
         self.assertEqual(len(result["sent"]), 0)
         send.assert_not_called()
 
+    def test_dispatch_stops_a_mandatory_blocked_sender(self):
+        seq.queue_enrollments(self.db, self.campaign, ["blocked@example.com"])
+        self.campaign.sender_email = "hello@ibos.io"
+        self.db.commit()
+        credentials = {"owner_id": "owner", "token": "token", "smtp_user_name": "smtp"}
+
+        with patch.object(seq.ep, "credentials", return_value=credentials), \
+                patch.object(seq, "_send_one", return_value="xid") as send:
+            result = seq.dispatch(self.db, limit=10)
+
+        row = self.db.query(models.SequenceEnrollment).one()
+        self.assertEqual(row.status, "paused")
+        self.assertEqual(len(result["paused"]), 1)
+        self.assertIn("mandatory policy", result["paused"][0])
+        send.assert_not_called()
+
     def test_pause_campaign_stops_active_enrollments(self):
         seq.queue_enrollments(self.db, self.campaign, ["a@example.com", "b@example.com"])
 

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app import email_provider, models, sendclean_client
+from app import email_provider, models, sendclean_client, sending_policy
 from app.db import Base
 
 
@@ -27,6 +27,35 @@ class _Response:
 
 
 class SendCleanClientTests(unittest.TestCase):
+    @patch("urllib.request.urlopen")
+    def test_blocked_sender_never_reaches_provider(self, urlopen):
+        with self.assertRaises(sending_policy.BlockedSendingIdentityError):
+            sendclean_client.send_mail(
+                "owner", "secret", "smtp",
+                {"from_email": "hello@ibos.io", "to": [{"email": "to@example.com"}]},
+            )
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_blocked_reply_to_never_reaches_provider(self, urlopen):
+        with self.assertRaises(sending_policy.BlockedSendingIdentityError):
+            sendclean_client.send_template(
+                "owner", "secret", "smtp",
+                {"from_email": "allowed@ibos.io",
+                 "headers": {"Reply-To": "iBOS <HELLO@IBOS.IO>"}},
+            )
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_allowed_sender_can_reach_provider(self, urlopen):
+        urlopen.return_value = _Response({"status": "success"})
+        result = sendclean_client.send_mail(
+            "owner", "secret", "smtp",
+            {"from_email": "allowed@ibos.io", "to": [{"email": "to@example.com"}]},
+        )
+        self.assertEqual(result["status"], "success")
+        urlopen.assert_called_once()
+
     @patch("urllib.request.urlopen")
     def test_account_uses_documented_auth_body(self, urlopen):
         urlopen.return_value = _Response({"status": "success", "user_data": {"name": "Account"}})

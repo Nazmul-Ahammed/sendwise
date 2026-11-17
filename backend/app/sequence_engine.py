@@ -32,6 +32,7 @@ from . import email_provider as ep
 from . import models
 from . import open_signal
 from . import sendclean_client as sc
+from . import sending_policy
 from . import tracking
 from . import delivery_ledger as ledger
 from .db import SessionLocal
@@ -424,6 +425,7 @@ def _smtp_connection(cfg):
 def _smtp_send(db, message):
     """Send one already-instrumented message through the SMTP relay."""
     from email.message import EmailMessage
+    sending_policy.require_message_allowed(message)
     cfg = _smtp_config(db)
     if not (cfg["host"] and cfg["user"] and cfg["password"]):
         raise RuntimeError(
@@ -944,9 +946,11 @@ def dispatch(db, dry_run=False, limit=300):
         # source of truth, so an enrollment that was already queued must not bypass it.
         # Persist the stopped state on the enrollment as well, keeping later ticks from
         # repeatedly loading the same paused work.
-        if campaign.status in ("paused", "exited"):
+        if campaign.status in ("paused", "exited") or sending_policy.is_blocked(campaign.sender_email):
             enr.status = "paused"
-            paused.append(f"{enr.email}: campaign {enr.campaign_slug} is {campaign.status}")
+            reason = (f"campaign is {campaign.status}" if campaign.status in ("paused", "exited")
+                      else f"sender {campaign.sender_email} is blocked by mandatory policy")
+            paused.append(f"{enr.email}: campaign {enr.campaign_slug} {reason}")
             db.commit()
             continue
 

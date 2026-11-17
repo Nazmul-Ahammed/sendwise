@@ -29,6 +29,7 @@ from .auth import create_token, hash_password, require_user, verify_password
 from .db import get_db, engine, stamp
 from .email_templates import branded_report_html, upsell_email, body_to_html
 from . import sendclean_client as sc
+from . import sending_policy
 from . import email_provider as ep
 from .llm_providers import encrypt_secret
 
@@ -682,6 +683,10 @@ def _sendclean_send(db, c, email_row, recipients, html, x_unique_id, tracking_do
 @router.post("/campaigns", dependencies=[Depends(require_user)])
 def create_campaign(body: CampaignCreate, db: Session = Depends(get_db)):
     """Create a send record. SendClean has no audience API, so recipients are an explicit list."""
+    try:
+        sending_policy.require_allowed(body.sender_email, role="sender_email")
+    except sending_policy.BlockedSendingIdentityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Slugs end up inside tracking tokens and URLs, so they are restricted to a safe
     # character set. Titles are free text: "26 October | PeopleDesk" used to become a
     # slug containing "|", which collided with the token delimiter and misfiled every
@@ -3475,6 +3480,10 @@ def _smtp_deliver(settings, subject, body_text, recipients, product="ibos", extr
     if not smtp_host or not settings.get("smtp_user") or not recipients:
         return False, "SMTP not configured or no recipients"
     try:
+        sending_policy.require_allowed(
+            settings.get("smtp_from") or settings.get("default_reply_to") or "sendwise@localhost",
+            role="smtp_from",
+        )
         html = branded_report_html(subject, body_text, sheet_link="", product=product, extra_html=extra_html)
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -4350,6 +4359,11 @@ class SettingPatch(BaseModel):
 def patch_setting(body: SettingPatch, db: Session = Depends(get_db)):
     if body.key == "email_provider" and body.value != "sendclean":
         raise HTTPException(status_code=400, detail="Sendwise is configured for SendClean only")
+    if body.key in ("smtp_from", "default_reply_to"):
+        try:
+            sending_policy.require_allowed(body.value, role=body.key)
+        except sending_policy.BlockedSendingIdentityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.key in ("sheet_update_time", "daily_sheet_update", "daily_email", "report_schedule_time"):
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(body.value or "")):
             raise HTTPException(status_code=400, detail=f"{body.key} must use 24-hour HH:MM format")
