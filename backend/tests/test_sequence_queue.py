@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
+from app import routes
 from app import sequence_engine as seq
 
 
@@ -73,6 +74,35 @@ class SequenceQueueTests(unittest.TestCase):
         self.assertEqual(row.status, "active")
         self.assertEqual(self.db.query(models.SendRecord).count(), 1)
         send.assert_called_once()
+
+    def test_dispatch_never_sends_a_paused_campaign(self):
+        seq.queue_enrollments(self.db, self.campaign, ["paused@example.com"])
+        self.campaign.status = "paused"
+        self.db.commit()
+        credentials = {"owner_id": "owner", "token": "token", "smtp_user_name": "smtp"}
+
+        with patch.object(seq.ep, "credentials", return_value=credentials), \
+                patch.object(seq, "_send_one", return_value="xid") as send:
+            result = seq.dispatch(self.db, limit=10)
+
+        row = self.db.query(models.SequenceEnrollment).one()
+        self.assertEqual(row.status, "paused")
+        self.assertEqual(len(result["paused"]), 1)
+        self.assertEqual(len(result["sent"]), 0)
+        send.assert_not_called()
+
+    def test_pause_campaign_stops_active_enrollments(self):
+        seq.queue_enrollments(self.db, self.campaign, ["a@example.com", "b@example.com"])
+
+        result = routes.pause_campaign(self.campaign.slug, self.db)
+
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(result["stopped_enrollments"], 2)
+        self.assertEqual(
+            self.db.query(models.SequenceEnrollment)
+            .filter(models.SequenceEnrollment.status == "active").count(),
+            0,
+        )
 
     def test_dispatch_stops_at_the_hourly_budget(self):
         seq.queue_enrollments(self.db, self.campaign, ["a@example.com", "b@example.com"])

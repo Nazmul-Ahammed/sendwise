@@ -940,6 +940,16 @@ def dispatch(db, dry_run=False, limit=300):
             db.commit()
             continue
 
+        # A campaign pause is a hard sending stop. The campaign row is the operator's
+        # source of truth, so an enrollment that was already queued must not bypass it.
+        # Persist the stopped state on the enrollment as well, keeping later ticks from
+        # repeatedly loading the same paused work.
+        if campaign.status in ("paused", "exited"):
+            enr.status = "paused"
+            paused.append(f"{enr.email}: campaign {enr.campaign_slug} is {campaign.status}")
+            db.commit()
+            continue
+
         opens = clicks = machine_opens = 0
         if enr.current_ref and enr.last_x_unique_id:
             # A send made before local tracking existed carries the provider's pixel, so

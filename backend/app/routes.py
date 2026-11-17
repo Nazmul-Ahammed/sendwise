@@ -2922,9 +2922,15 @@ def pause_campaign(slug: str, db: Session = Depends(get_db)):
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
     c.status = "paused"
-    db.add(models.Job(job_type="warning", title=f"Sequence paused · {c.slug}", detail="Manual operator action", status="done", created_at=stamp()))
+    stopped = (db.query(models.SequenceEnrollment)
+               .filter(models.SequenceEnrollment.campaign_slug == slug,
+                       models.SequenceEnrollment.status == "active")
+               .update({"status": "paused"}, synchronize_session=False))
+    db.add(models.Job(job_type="warning", title=f"Sequence paused · {c.slug}",
+                      detail=f"Manual operator action · {stopped} active enrollment(s) stopped",
+                      status="done", created_at=stamp()))
     db.commit()
-    return _campaign_dict(c, db)
+    return {**_campaign_dict(c, db), "stopped_enrollments": stopped}
 
 
 @router.post("/campaigns/{slug}/ready", dependencies=[Depends(require_user)])
