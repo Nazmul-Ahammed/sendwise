@@ -359,6 +359,38 @@ BRANDS = {
 }
 
 
+# Products that have a user-approved email design. When a product is listed here its
+# compiled HTML shell follows that approved design exactly: the name, the tagline, the
+# embedded logo asset, the CTA geometry, the signer and the footer line all come from
+# this record, never from the generic brand palette. The canonical HTML lives in
+# brand_docs so the renderer and the approved artwork cannot drift apart.
+APPROVED_TEMPLATES = {
+    "managerium": {
+        "file": "managerium-email-template.html",
+        "name": "Managerium ERP",
+        "tag": "All-in-One ERP Solution",
+        "footer": "An iBOS Business Solution by AKIJ Resource",
+        "marker": "<!-- Managerium ERP Email Template -->",
+        "logo_width": 120,
+        "cta_pad_x": 28,
+        "signer": "Sayadul Islam Chowdhury",
+    },
+    "primevat": {
+        "file": "primevat-email-template.html",
+        "name": "PrimeVAT",
+        "tag": "Smart VAT Compliance",
+        "footer": "An iBOS VAT Management Solution",
+        "marker": "<!-- PrimeVAT Email Template -->",
+        "logo_width": 130,
+        "cta_pad_x": 28,
+        "signer": "Sayadul Islam Chowdhury",
+        # The approved artwork is drawn in #183870, not the generic #1C2880 palette,
+        # so the border, headline, button and footer match the supplied design.
+        "primary": "#183870",
+    },
+}
+
+
 def brand_config(key="turbo"):
     b = BRANDS.get(key, BRANDS["ibos"])
     base = dict(BRAND)
@@ -495,16 +527,16 @@ def _logos():
     return _LOGOS
 
 
-def _managerium_template_logo():
-    """Read the exact logo embedded in the user-approved Managerium template.
+def _approved_template_logo(filename):
+    """Read the exact logo embedded in a user-approved email template.
 
-    The canonical source stays in brand_docs, so the renderer and the supplied design
+    The canonical artwork stays in brand_docs, so the renderer and the supplied design
     cannot quietly drift into two different logos.
     """
     import os as _os
     path = _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)),
-        "brand_docs", "managerium-email-template.html",
+        "brand_docs", filename,
     )
     try:
         with open(path, encoding="utf-8") as fh:
@@ -538,11 +570,14 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
     `unsubscribe_url`, when given, renders the compliance unsubscribe line.
     """
     b, c = brand_config(product)
-    primary = b["primary"]
+    approved = APPROVED_TEMPLATES.get(product)
+    primary = (approved or {}).get("primary") or b["primary"]
     footer_accent = _tint(primary)
     brand_name = b["name"]
     tagline = b["tag"]
-    is_managerium = product == "managerium"
+    if approved:
+        brand_name = approved["name"]
+        tagline = approved["tag"]
     is_turbo_guard = product == "turbo_guard"
     campaign_text = f"{headline} {body_text}"
     is_coffee_offer = is_turbo_guard and "US$5.55" in campaign_text
@@ -644,16 +679,17 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
         body_lines.append(line)
         i += 1
 
-    logo = _managerium_template_logo() if is_managerium else _logos().get(product, "")
-    if is_managerium and not logo:
+    logo = (_approved_template_logo(approved["file"]) if approved
+            else _logos().get(product, ""))
+    if approved and not logo:
         raise RuntimeError(
-            "Managerium email template is missing its approved logo asset; rendering blocked"
+            f"{brand_name} email template is missing its approved logo asset; rendering blocked"
         )
     name_mark = (f'<span style="font-size:18px;line-height:1.2;font-weight:bold;color:{primary};'
                  f'letter-spacing:0.3px;">{_esc(brand_name)}</span>')
     if logo:
         # Must be a public HTTPS raster URL: email clients block SVG and strip data: URIs.
-        logo_width = 120 if is_managerium else 40
+        logo_width = approved["logo_width"] if approved else 40
         logo_img = (f'<img src="{logo}" alt="{_esc(brand_name)}" width="{logo_width}" border="0" '
                     f'style="display:block;width:{logo_width}px;max-width:{logo_width}px;height:auto;border:0;'
                     f'outline:none;text-decoration:none;">')
@@ -663,7 +699,7 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
         # image header would otherwise leave the reader with nothing to identify.
         # A brand whose logo already contains its name sets `logo_only`, and then the
         # header is the mark alone: the name would otherwise appear twice.
-        if b.get("logo_only") or is_managerium:
+        if b.get("logo_only") or approved:
             brand_mark = logo_img
         else:
             brand_mark = (
@@ -739,7 +775,7 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
         def button_html(text, link, own_color, own_label_color=""):
             color = own_color or base_color
             label_color = own_label_color or cta_text_override or _cta_text_color(color)
-            horizontal_padding = 28 if is_managerium else 24
+            horizontal_padding = approved["cta_pad_x"] if approved else 24
             style = (f'display:inline-block;background:{color};color:{label_color};'
                       f'text-decoration:none;padding:13px {horizontal_padding}px;border-radius:8px;'
                      f'font-size:14px;font-weight:bold;white-space:nowrap;')
@@ -763,9 +799,9 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
                 'align="center" style="margin:2px auto 0;"><tr>' + cells + '</tr></table>'
             )
 
-    default_signer = "Sayadul Islam Chowdhury" if is_managerium else brand_name.title()
+    default_signer = approved["signer"] if approved else brand_name.title()
     parts.append(f'<p style="margin:28px 0 0;font-size:14px;color:{text_color};">'
-                 f'Best regards,<br>{_esc(default_signer if is_managerium else (signer or default_signer))}</p>')
+                 f'Best regards,<br>{_esc(default_signer if approved else (signer or default_signer))}</p>')
 
     if unsubscribe_url:
         parts.append(
@@ -783,9 +819,8 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
         disclaimer += (" Starbucks and its marks are referenced only for the supplied price comparison. "
                        "No partnership, sponsorship, or endorsement is implied.")
 
-    managerium_marker = "<!-- Managerium ERP Email Template -->" if is_managerium else ""
-    footer_tagline = ("An iBOS Business Solution by AKIJ Resource"
-                      if is_managerium else tagline)
+    approved_marker = approved["marker"] if approved else ""
+    footer_tagline = approved["footer"] if approved else tagline
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -801,7 +836,7 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
   }}
 </style>
 </head>
-{managerium_marker}
+{approved_marker}
 
 <body style="margin:0;padding:0;background:{page_bg};font-family:{FONT};">
 
