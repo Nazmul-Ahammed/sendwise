@@ -9,9 +9,13 @@ These tests pin the behaviour so it cannot come back quietly.
 """
 import inspect
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import models
 from app import sequence_engine as seq
 
 
@@ -89,11 +93,59 @@ class SequenceDelayTests(unittest.TestCase):
                       "the audit must compare against the slowest possible next step")
 
         import app.routes as routes
-        fix_source = inspect.getsource(routes.sequences_self_check_fix)
-        self.assertIn("wait_after(camp", fix_source,
-                      "the fix must use wait_after(...) - the next email's stage")
+        fix_source = inspect.getsource(seq.repair_delay_mismatches)
+        self.assertIn("wait_after(campaign", fix_source,
+                      "the repair must use wait_after(...) - the next email's stage")
         self.assertNotIn("_stage_delay(camp, e.current_ref)", fix_source,
                          "the fix must never read the stage of the email already sent")
+        cron_source = inspect.getsource(routes.cron_sequence_dispatch)
+        self.assertIn("repair_delay_mismatches", cron_source,
+                      "the scheduler must repair a wrong clock without operator action")
+        self.assertLess(cron_source.index("repair_delay_mismatches"),
+                        cron_source.index("seq.dispatch"),
+                        "clock repair must run before the dispatcher selects due work")
+
+    def test_wrong_clock_is_repaired_idempotently_without_touching_send_state(self):
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine)
+        db = sessionmaker(bind=engine)()
+        try:
+            stages = [
+                {"stage": 1, "delay_value": 0, "delay_unit": "day", "emails": [{
+                    "ref": "E1", "open_click_next": "E2",
+                    "open_no_click_next": "E2", "not_open_next": "E2",
+                }]},
+                {"stage": 2, "delay_value": 3, "delay_unit": "day",
+                 "emails": [{"ref": "E2"}]},
+            ]
+            db.add(models.Campaign(
+                slug="wrong-clock", title="Wrong clock", status="live",
+                product="Turbo Guard", sequence_json=stages, emails_json=[]))
+            last = datetime(2026, 11, 11, 8, 0, tzinfo=timezone.utc)
+            row = models.SequenceEnrollment(
+                campaign_slug="wrong-clock", email="a@example.com", token="tok-clock",
+                status="active", current_ref="E1", sends=1, pending_ref="",
+                last_sent_at=seq._iso(last),
+                next_due_at=seq._iso(last + timedelta(days=5)),
+                history_json=[{"ref": "E1", "sent_at": seq._iso(last)}],
+            )
+            db.add(row)
+            db.commit()
+
+            first = seq.repair_delay_mismatches(db)
+            second = seq.repair_delay_mismatches(db)
+            db.refresh(row)
+
+            self.assertEqual(first, {"checked": 1, "fixed": 1})
+            self.assertEqual(second, {"checked": 0, "fixed": 0})
+            self.assertEqual(row.next_due_at, seq._iso(last + timedelta(days=3)))
+            self.assertEqual(row.current_ref, "E1")
+            self.assertEqual(row.sends, 1)
+            self.assertEqual(row.pending_ref, "")
+            self.assertEqual(len(row.history_json), 1)
+        finally:
+            db.close()
+            engine.dispose()
 
     def test_dispatch_check_delays_from_the_stage_not_the_sent_one(self):
         """The wait belongs to the NEXT email's stage.

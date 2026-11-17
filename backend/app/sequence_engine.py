@@ -315,6 +315,51 @@ def audit_delays(db, tolerance_hours=2):
     return problems
 
 
+def repair_delay_mismatches(db, problems=None):
+    """Re-time active journeys whose stored clock contradicts their sequence.
+
+    This is deliberately narrow: ``audit_delays`` only reports a row when its stored
+    wait is longer than even the slowest valid next branch (plus tolerance).  Correct
+    rows, initial sends and terminal steps are therefore never changed.  Dispatch still
+    enforces the chosen branch's own wait before sending, so repairing a wake-up time
+    cannot make a message leave earlier than its sequence allows.
+
+    The function is idempotent and only changes ``next_due_at``.  Send state, claims,
+    history and counters are untouched, which makes it safe to run before every cron
+    dispatch without creating a duplicate-send path.
+    """
+    mismatches = list(problems if problems is not None else audit_delays(db))
+    fixed = 0
+    campaigns = {c.slug: c for c in db.query(models.Campaign).all()}
+
+    for problem in mismatches:
+        campaign_slug = str(problem.get("campaign") or "")
+        email = str(problem.get("email") or "")
+        enrollment = (db.query(models.SequenceEnrollment)
+                      .filter(models.SequenceEnrollment.campaign_slug == campaign_slug,
+                              models.SequenceEnrollment.email == email,
+                              models.SequenceEnrollment.status == "active")
+                      .first())
+        campaign = campaigns.get(campaign_slug)
+        if not enrollment or not campaign:
+            continue
+
+        last = _parse(enrollment.last_sent_at)
+        wait = wait_after(campaign, enrollment.current_ref)
+        if not last or wait is None:
+            continue
+
+        corrected = _iso(last + wait)
+        if enrollment.next_due_at == corrected:
+            continue
+        enrollment.next_due_at = corrected
+        fixed += 1
+
+    if fixed:
+        db.commit()
+    return {"checked": len(mismatches), "fixed": fixed}
+
+
 # --------------------------------------------------------------- sending
 def _email_row(campaign, ref):
     for row in (campaign.emails_json or []):

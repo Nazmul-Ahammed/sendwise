@@ -1303,7 +1303,23 @@ def cron_sequence_dispatch(x_cron_secret: str = Header(default=""), dry_run: int
     if not dry_run and not seq.acquire_dispatch_lock(db):
         return {"ok": True, "skipped": "another dispatch is already in progress"}
 
+    repair_result = {"checked": 0, "fixed": 0}
     try:
+        # A wrong stored wake-up time used to leave a healthy-looking journey asleep
+        # forever.  Repair only delays that are provably longer than every valid next
+        # branch, while the dispatch lock is held, then let the normal duplicate-safe
+        # dispatcher decide whether anything is actually due.
+        if not dry_run:
+            problems = seq.audit_delays(db)
+            repair_result = seq.repair_delay_mismatches(db, problems)
+            if repair_result["fixed"]:
+                db.add(models.Job(
+                    job_type="warning",
+                    title=f"Re-timed {repair_result['fixed']} stuck enrollment(s)",
+                    detail="Automatic pre-dispatch repair set each wake-up time to "
+                           "the delay declared by its sequence",
+                    status="done", created_at=stamp()))
+                db.commit()
         result = seq.dispatch(db, dry_run=bool(dry_run))
     finally:
         if not dry_run:
@@ -1360,9 +1376,8 @@ def cron_sequence_dispatch(x_cron_secret: str = Header(default=""), dry_run: int
     # downtime is caught up on either way.
     _maybe_auto_backup(db, label="auto")
 
-    # Self-check: a journey waiting on the wrong clock looks completely normal from the
-    # outside, so the tick verifies that what each enrollment is waiting for matches
-    # what its sequence declares. A mismatch is recorded loudly instead of silently.
+    # Post-dispatch verification catches a regression immediately. The pre-dispatch
+    # repair above should leave this empty; if it does not, keep the warning loud.
     try:
         from . import sequence_engine as seq_check
         problems = seq_check.audit_delays(db)
@@ -1374,13 +1389,13 @@ def cron_sequence_dispatch(x_cron_secret: str = Header(default=""), dry_run: int
                     f"{p['email']} @ {p['campaign']} ({p['ref']}): waiting {p['actual']}, "
                     f"sequence says {p['expected']}" for p in problems[:3])
                     + (" …" if len(problems) > 3 else "")
-                    + " · fix from Sequences → Self-check",
+                    + " · automatic repair did not clear these rows",
                 status="failed", created_at=stamp()))
             db.commit()
     except Exception:  # noqa: BLE001 - a self-check must never break a send
         pass
 
-    return {"ok": True, **result}
+    return {"ok": True, "clock_repair": repair_result, **result}
 
 
 def _maybe_auto_backup(db, label="auto"):
@@ -3089,26 +3104,8 @@ def sequences_self_check_fix(db: Session = Depends(get_db)):
     """Re-time any stuck enrollment to the wait its sequence actually declares."""
     from . import sequence_engine as seq
     problems = seq.audit_delays(db)
-    fixed = 0
-    for p in problems:
-        e = (db.query(models.SequenceEnrollment)
-             .filter(models.SequenceEnrollment.campaign_slug == p["campaign"],
-                     models.SequenceEnrollment.email == p["email"],
-                     models.SequenceEnrollment.status == "active").first())
-        if not e:
-            continue
-        camp = db.query(models.Campaign).filter(models.Campaign.slug == p["campaign"]).first()
-        last = seq._parse(e.last_sent_at)
-        if not camp or not last:
-            continue
-        # Use the wait AFTER the last email sent (the next email's stage), never the
-        # stage of the email already sent - reading the wrong stage is the bug this
-        # whole check exists to catch, and it would make a 3-day journey due at once.
-        wait = seq.wait_after(camp, e.current_ref)
-        if wait is None:
-            continue
-        e.next_due_at = seq._iso(last + wait)
-        fixed += 1
+    repair = seq.repair_delay_mismatches(db, problems)
+    fixed = repair["fixed"]
     if fixed:
         db.add(models.Job(job_type="warning", title=f"Re-timed {fixed} stuck enrollment(s)",
                           detail="set to the wait their sequence actually declares",
