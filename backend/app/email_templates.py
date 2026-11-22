@@ -388,6 +388,64 @@ APPROVED_TEMPLATES = {
         # so the border, headline, button and footer match the supplied design.
         "primary": "#183870",
     },
+    "peopledesk": {
+        "file": "peopledesk-email-template.html",
+        "name": "PeopleDesk",
+        "tag": "Smart HR Management",
+        "footer": "An iBOS HR Management Solution",
+        "marker": "<!-- PeopleDesk Email Template -->",
+        "logo_width": 130,
+        "cta_pad_x": 28,
+        "signer": "Sayadul Islam Chowdhury",
+        "primary": "#34a853",
+    },
+    "trackforce": {
+        "file": "trackforce-email-template.html",
+        "name": "TrackForce",
+        "tag": "Work Visibility Made Simple",
+        "footer": "An iBOS Workforce Productivity Solution",
+        "marker": "<!-- TrackForce Email Template -->",
+        "logo_width": 130,
+        "cta_pad_x": 28,
+        "signer": "Team TrackForce",
+        "primary": "#2563EB",
+    },
+    "travilo": {
+        # The supplied Travilo artwork is already the canonical standard file.
+        "file": "email-template-standard.html",
+        "name": "Travilo",
+        "tag": "Connected Travel Business Platform",
+        "footer": "A Connected Travel Technology Solution",
+        "marker": "<!-- Travilo Email Template -->",
+        "logo_width": 130,
+        "cta_pad_x": 28,
+        "signer": "Team Travilo",
+        "primary": "#3954aa",
+    },
+    "turbo": {
+        "file": "turbo-addons-email-template.html",
+        "name": "Turbo Add-ons",
+        "tag": "Build more. Switch less.",
+        "footer": "Turbo Add-ons for Elementor - Build smarter on WordPress",
+        "marker": "<!-- Turbo Add-ons Email Template -->",
+        "logo_width": 220,
+        "cta_pad_x": 24,
+        "signer": "Team Turbo Add-ons",
+        "primary": "#2e3192",
+    },
+    "turbo_guard": {
+        "file": "turbo-guard-email-template.html",
+        "name": "Turbo Guard",
+        "tag": "WordPress security, made clear",
+        "footer": "Turbo Guard - Security & Malware Scanner for WordPress",
+        "marker": "<!-- Turbo Guard Email Template -->",
+        "logo_width": 42,
+        "cta_pad_x": 24,
+        "signer": "Team Turbo Guard",
+        "primary": "#2f7df4",
+        # This approved design uses a TG text mark instead of an embedded image.
+        "logo_required": False,
+    },
 }
 
 
@@ -681,7 +739,7 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
 
     logo = (_approved_template_logo(approved["file"]) if approved
             else _logos().get(product, ""))
-    if approved and not logo:
+    if approved and approved.get("logo_required", True) and not logo:
         raise RuntimeError(
             f"{brand_name} email template is missing its approved logo asset; rendering blocked"
         )

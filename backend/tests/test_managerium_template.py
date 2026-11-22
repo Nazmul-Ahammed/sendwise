@@ -53,7 +53,7 @@ Another Sender""",
         self.assertIn("An iBOS Business Solution by AKIJ Resource", result["body_html"])
 
     def test_other_products_keep_the_standard_template(self):
-        html = body_to_html("Hi there,\n\nHello", product="peopledesk", headline="Hello")
+        html = body_to_html("Hi there,\n\nHello", product="ibos", headline="Hello")
         self.assertNotIn("Managerium ERP Email Template", html)
         self.assertNotIn("All-in-One ERP Solution", html)
         self.assertNotIn("Sayadul Islam Chowdhury", html)

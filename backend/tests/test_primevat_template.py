@@ -51,7 +51,7 @@ Another Sender""",
         self.assertIn("Automated Mushak and VAT reporting", html)
 
     def test_other_products_keep_the_standard_template(self):
-        html = body_to_html("Hi there,\n\nHello", product="peopledesk", headline="Hello")
+        html = body_to_html("Hi there,\n\nHello", product="ibos", headline="Hello")
         self.assertNotIn("PrimeVAT Email Template", html)
         self.assertNotIn("Smart VAT Compliance", html)
         self.assertNotIn("An iBOS VAT Management Solution", html)
