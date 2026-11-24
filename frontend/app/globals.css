@@ -508,6 +508,38 @@ table.audience-sheet input::placeholder { color: var(--ink-4); }
 .sheet-summary-action.danger { color: var(--danger); }
 .audience-skip-blocked { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; cursor: pointer; }
 .audience-sheet-actions { margin-top: 14px; }
+.audience-import-tabs {
+  display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+}
+.audience-import-tabs button {
+  min-height: 36px; padding: 7px 14px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--ink-3); font: 650 12.5px var(--font); cursor: pointer;
+}
+.audience-import-tabs button:hover { color: var(--ink); }
+.audience-import-tabs button.on {
+  background: var(--surface); color: var(--brand-600); box-shadow: var(--shadow-sm);
+}
+.audience-import-tabs button:disabled { opacity: .55; cursor: default; }
+.audience-import-panel {
+  padding: 16px; border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.audience-import-panel > label { display: block; margin-bottom: 7px; color: var(--ink-2); font-size: 12.5px; font-weight: 700; }
+.audience-quick-paste { min-height: 150px !important; resize: vertical; background: var(--surface) !important; }
+.audience-csv-picker {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); background: var(--surface);
+}
+.audience-csv-picker input[type="file"] { max-width: 100%; font: 12.5px var(--font); }
+.audience-csv-name { margin-top: 10px; color: var(--ink-2); font-size: 12.5px; }
+.audience-import-empty {
+  margin-top: 12px; padding: 20px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  color: var(--ink-3); background: var(--surface); font-size: 12.5px; text-align: center;
+}
+.audience-import-preview { max-height: 330px; overflow: auto; margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.audience-import-preview table { margin: 0; }
+.audience-import-more { margin-top: 7px; }
 
 /* ===== Notes / alerts ===== */
 .note { display: flex; gap: var(--s3); align-items: flex-start; padding: 14px var(--s4); border-radius: var(--radius); font-size: 13.5px; border: 1px solid; margin-top: var(--s4); line-height: 1.55; }

@@ -123,10 +123,11 @@ export const api = {
   createAudience: (name, description = "") => request("/api/audiences", { method: "POST", body: JSON.stringify({ name, description }) }),
   updateAudience: (id, payload) => request(`/api/audiences/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteAudience: (id) => request(`/api/audiences/${id}`, { method: "DELETE" }),
-  audienceContacts: (id, tags = "", tagMatch = "any", q = "") => {
+  audienceContacts: (id, tags = "", tagMatch = "any", q = "", page = 0, pageSize = 0) => {
     const t = Array.isArray(tags) ? tags.join(",") : (tags || "");
     const search = (q || "").trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
-    return request(`/api/audiences/${id}/contacts?tags=${encodeURIComponent(t)}&tag_match=${encodeURIComponent(tagMatch)}${search}`);
+    const paging = pageSize > 0 ? `&page=${page || 1}&page_size=${pageSize}` : "";
+    return request(`/api/audiences/${id}/contacts?tags=${encodeURIComponent(t)}&tag_match=${encodeURIComponent(tagMatch)}${search}${paging}`);
   },
   addAudienceContacts: (id, payload) => request(`/api/audiences/${id}/contacts`, { method: "POST", body: JSON.stringify(payload) }),
   removeAudienceContacts: (id, payload) => request(`/api/audiences/${id}/contacts/remove`, { method: "POST", body: JSON.stringify(payload) }),

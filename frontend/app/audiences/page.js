@@ -5,7 +5,7 @@ import AppShell from "../../components/AppShell";
 import TagSelect from "../../components/TagSelect";
 import AddContacts from "../../components/AddContacts";
 import VerifyBadge from "../../components/VerifyBadge";
-import { usePager, Pager } from "../../components/Pagination";
+import { Pager } from "../../components/Pagination";
 import { api } from "../../lib/api";
 
 function tagList(tags) {
@@ -46,8 +46,8 @@ export default function AudiencesPage() {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
-  // A saved audience can hold thousands of contacts; page the list rather than scroll it.
-  const contactsPager = usePager(detail?.contacts || [], 25);
+  const [contactPage, setContactPage] = useState(1);
+  const [contactPageSize, setContactPageSize] = useState(25);
 
   async function loadAudiences(keepId) {
     try {
@@ -59,7 +59,7 @@ export default function AudiencesPage() {
       const want = keepId != null ? keepId : (selected ?? (rows.length ? rows[0].id : null));
       if (want) {
         setSelected(want);
-        await loadDetail(want, tagFilters, matchMode);
+        await loadDetail(want, tagFilters, matchMode, memberQuery, contactPage, contactPageSize);
       } else {
         setSelected(null);
         setDetail(null);
@@ -69,11 +69,15 @@ export default function AudiencesPage() {
     }
   }
 
-  async function loadDetail(id, tags, match, query) {
+  async function loadDetail(id, tags, match, query, page = contactPage, pageSize = contactPageSize) {
     if (!id) return;
     try {
       const q = query === undefined ? memberQuery : query;
-      setDetail(await api.audienceContacts(id, tags || [], match || "any", q || ""));
+      const response = await api.audienceContacts(
+        id, tags || [], match || "any", q || "", page, pageSize,
+      );
+      setDetail(response);
+      setContactPage(response.page || 1);
     } catch (e) {
       setError(e.message);
     }
@@ -327,7 +331,8 @@ export default function AudiencesPage() {
     const mode = match === undefined ? matchMode : match;
     setTagFilters(tags);
     setMatchMode(mode);
-    await loadDetail(selected, tags, mode, memberQuery);
+    setContactPage(1);
+    await loadDetail(selected, tags, mode, memberQuery, 1, contactPageSize);
   }
 
   // Typing in the member search waits 300ms before asking the API, so a 12-character
@@ -336,7 +341,8 @@ export default function AudiencesPage() {
     setMemberQuery(value);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
-      loadDetail(selected, tagFilters, matchMode, value);
+      setContactPage(1);
+      loadDetail(selected, tagFilters, matchMode, value, 1, contactPageSize);
     }, 300);
   }
 
@@ -347,6 +353,27 @@ export default function AudiencesPage() {
   // Tags for the OPEN audience only - never borrowed from another list.
   const audienceTagOptions = Object.entries(detail?.tags || current?.tags || {})
     .map(([tag, contacts]) => ({ tag, contacts }));
+  const contactsPager = {
+    rows: detail?.contacts || [],
+    total: detail?.count || 0,
+    page: detail?.page || contactPage,
+    pages: detail?.pages || 1,
+    perPage: detail?.page_size || contactPageSize,
+    start: ((detail?.page || contactPage) - 1) * (detail?.page_size || contactPageSize),
+    end: Math.min(
+      (detail?.page || contactPage) * (detail?.page_size || contactPageSize),
+      detail?.count || 0,
+    ),
+    setPage: (page) => {
+      setContactPage(page);
+      loadDetail(selected, tagFilters, matchMode, memberQuery, page, contactPageSize);
+    },
+    setPerPage: (size) => {
+      setContactPage(1);
+      setContactPageSize(size);
+      loadDetail(selected, tagFilters, matchMode, memberQuery, 1, size);
+    },
+  };
 
   return (
     <AppShell>
@@ -428,7 +455,7 @@ export default function AudiencesPage() {
             {audiences.map((a) => (
               <button
                 key={a.id}
-                onClick={async () => { setSelected(a.id); setTagFilters([]); setMatchMode("any"); setPicked([]); setTagAdd([]); setTagRemove([]); await loadDetail(a.id, [], "any"); }}
+                onClick={async () => { setSelected(a.id); setTagFilters([]); setMatchMode("any"); setPicked([]); setTagAdd([]); setTagRemove([]); setContactPage(1); await loadDetail(a.id, [], "any", "", 1, contactPageSize); }}
                 style={{
                   display: "block", width: "100%", textAlign: "left", cursor: "pointer",
                   padding: "10px 12px", marginBottom: 8, borderRadius: 8,
@@ -616,7 +643,7 @@ export default function AudiencesPage() {
                   <div className="card-h">
                     <h3>Members</h3>
                     <span className="hint">
-                      {detail ? `${detail.count} shown` : "-"}
+                      {detail ? `${detail.count} contact(s)` : "-"}
                       {tagFilters.length ? ` · ${tagFilters.join(matchMode === "all" ? " AND " : " OR ")}` : ""}
                     </span>
                   </div>
@@ -713,7 +740,7 @@ export default function AudiencesPage() {
                           <thead>
                             <tr>
                               <th style={{ width: 28 }} />
-                              <th>Email</th><th>Deliverability</th><th>Tags</th><th>Status</th><th />
+                              <th>Name</th><th>Email</th><th>Deliverability</th><th>Tags</th><th>Status</th><th />
                             </tr>
                           </thead>
                           <tbody>
@@ -727,6 +754,7 @@ export default function AudiencesPage() {
                                     aria-label={`Select ${c.email}`}
                                   />
                                 </td>
+                                <td>{c.name ? <b style={{ fontSize: 12.5 }}>{c.name}</b> : <span className="hint">No name</span>}</td>
                                 <td className="mono" style={{ fontSize: 12 }}>{c.email}</td>
                                 <td><VerifyBadge status={c.email_status} reason={c.email_reason} /></td>
                                 <td>

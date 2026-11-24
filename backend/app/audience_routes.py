@@ -8,11 +8,12 @@ Suppression always wins: an address on the global suppression list (unsubscribe,
 hard bounce, complaint) is never returned as a recipient, whatever its tags say.
 """
 import re
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from . import models
@@ -251,41 +252,80 @@ class ContactPatch(BaseModel):
 
 def _parse_pasted(text, emails):
     """Accept a list, a textarea, or both. Supports 'Name <email>'."""
+    def parse_one(value):
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        match = re.match(r"^(.*)<([^<>]+)>\s*$", raw)
+        if match:
+            return (_clean(match.group(2)), match.group(1).strip().strip('"').strip("'"))
+        return (_clean(raw), "")
+
     out = []
     for raw in (emails or []):
-        e = _clean(raw)
-        if e:
-            out.append((e, ""))
+        parsed = parse_one(raw)
+        if parsed:
+            out.append(parsed)
     for line in str(text or "").replace(",", "\n").split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r"^(.*)<([^<>]+)>\s*$", line)
-        if m:
-            out.append((_clean(m.group(2)), m.group(1).strip().strip('"').strip("'")))
-        else:
-            out.append((_clean(line), ""))
+        parsed = parse_one(line)
+        if parsed:
+            out.append(parsed)
     return out
 
 
 @router.get("/audiences", dependencies=[Depends(require_user)])
 def list_audiences(db: Session = Depends(get_db)):
-    out = []
+    audiences = (db.query(models.Audience)
+                 .filter(models.Audience.deleted_at == "")
+                 .order_by(models.Audience.name).all())
+    if not audiences:
+        return []
+
+    audience_ids = [audience.id for audience in audiences]
+    members = (db.query(models.AudienceMember)
+               .filter(models.AudienceMember.audience_id.in_(audience_ids)).all())
+    contact_ids = {member.contact_id for member in members}
+    contacts = {contact.id: contact for contact in _live_contacts(db, contact_ids)}
     suppressed = _suppressed_email_set(db)
-    for a in db.query(models.Audience).filter(models.Audience.deleted_at == "").order_by(models.Audience.name).all():
-        members = db.query(models.AudienceMember).filter(models.AudienceMember.audience_id == a.id).all()
-        ids = [m.contact_id for m in members]
-        contacts = _live_contacts(db, ids)
-        # Tags come from this audience's own memberships - never from another list.
-        tags = audience_tag_inventory(db, a.id)
-        usable = len(member_emails(db, a.id, suppressed=suppressed))
-        bad = sum(1 for c in contacts if (c.email_status or "") in ("invalid", "no_mx"))
-        risky = sum(1 for c in contacts if (c.email_status or "") in ("disposable", "role"))
-        unchecked = sum(1 for c in contacts if (c.email_status or "unverified") in ("unverified", "unknown"))
+    registered = defaultdict(dict)
+    for tag in (db.query(models.AudienceTag)
+                .filter(models.AudienceTag.audience_id.in_(audience_ids)).all()):
+        name = _clean(tag.name)
+        if name:
+            registered[tag.audience_id][name] = 0
+
+    summaries = {
+        audience.id: {
+            "members": 0, "usable": 0, "blocked": 0, "risky": 0,
+            "unchecked": 0, "tags": dict(registered[audience.id]),
+        }
+        for audience in audiences
+    }
+    for member in members:
+        contact = contacts.get(member.contact_id)
+        if not contact:
+            continue
+        summary = summaries[member.audience_id]
+        summary["members"] += 1
+        status = contact.email_status or "unverified"
+        email = _clean(contact.email)
+        if status in ("invalid", "no_mx"):
+            summary["blocked"] += 1
+        if status in ("disposable", "role"):
+            summary["risky"] += 1
+        if status in ("unverified", "unknown"):
+            summary["unchecked"] += 1
+        if contact.status == "subscribed" and email not in suppressed and status not in ("invalid", "no_mx"):
+            summary["usable"] += 1
+        for tag_name in normalise_tags(member.tags):
+            summary["tags"][tag_name] = summary["tags"].get(tag_name, 0) + 1
+
+    out = []
+    for a in audiences:
+        summary = summaries[a.id]
         out.append({
             "id": a.id, "name": a.name, "description": a.description,
-            "members": len(contacts), "usable": usable, "tags": tags,
-            "blocked": bad, "risky": risky, "unchecked": unchecked,
+            **summary,
             "created_at": a.created_at.isoformat() if a.created_at else "",
         })
     return out
@@ -462,35 +502,66 @@ def delete_audience_tag(audience_id: int, tag: str, db: Session = Depends(get_db
 
 @router.get("/audiences/{audience_id}/contacts", dependencies=[Depends(require_user)])
 def audience_contacts(audience_id: int, tags: str = "", tag_match: str = "any", q: str = "",
-                      db: Session = Depends(get_db)):
+                      page: int = 0, page_size: int = 0, db: Session = Depends(get_db)):
     a = _audience_or_404(db, audience_id)
-    pairs = (db.query(models.Contact, models.AudienceMember)
-             .join(models.AudienceMember, models.AudienceMember.contact_id == models.Contact.id)
-             .filter(models.AudienceMember.audience_id == a.id)
-             .filter(models.Contact.deleted_at == "")
-             .all())
-    pairs = sorted(pairs, key=lambda p: p[0].email)
-
+    base = (db.query(models.Contact, models.AudienceMember)
+            .join(models.AudienceMember, models.AudienceMember.contact_id == models.Contact.id)
+            .filter(models.AudienceMember.audience_id == a.id)
+            .filter(models.Contact.deleted_at == ""))
     want = parse_tag_param(tags)
-    if want:
-        pairs = [(c, m) for c, m in pairs if _tag_matches(normalise_tags(m.tags), want, tag_match)]
-
-    # Search inside the list. An audience can hold thousands of addresses, so looking one
-    # person up by email should not mean scrolling or exporting the list. Matches the
-    # address or the stored name, case-insensitively, and runs before the delivery
-    # checks below so the counts still describe exactly the rows returned.
     needle = (q or "").strip().lower()
     if needle:
-        pairs = [(c, m) for c, m in pairs
-                 if needle in (c.email or "").lower() or needle in (c.name or "").lower()]
+        like = f"%{needle}%"
+        base = base.filter(or_(
+            func.lower(models.Contact.email).like(like),
+            func.lower(models.Contact.name).like(like),
+        ))
 
-    # Mark who will actually receive a send. The campaign resolves recipients
-    # through `member_emails`, which drops unsubscribed, suppressed and
-    # un-deliverable addresses - so the preview must reflect exactly that, or it
-    # would promise delivery to someone the send will skip.
-    out_rows = []
-    receiving = 0
     suppressed = _suppressed_email_set(db)
+    if want:
+        pairs = base.all()
+        pairs = [(c, m) for c, m in pairs
+                 if _tag_matches(normalise_tags(m.tags), want, tag_match)]
+        pairs.sort(key=lambda pair: pair[0].email)
+        total = len(pairs)
+        receiving = sum(
+            1 for contact, _ in pairs
+            if contact.status == "subscribed"
+            and _clean(contact.email) not in suppressed
+            and (contact.email_status or "") not in ("invalid", "no_mx")
+        )
+        if page_size > 0:
+            size = max(1, min(int(page_size), 250))
+            pages = max(1, (total + size - 1) // size)
+            current_page = max(1, min(int(page or 1), pages))
+            start = (current_page - 1) * size
+            pairs = pairs[start:start + size]
+        else:
+            size, pages, current_page = total or 1, 1, 1
+    else:
+        total = base.count()
+        receiving_query = base.filter(
+            models.Contact.status == "subscribed",
+            or_(
+                models.Contact.email_status.is_(None),
+                ~models.Contact.email_status.in_(("invalid", "no_mx")),
+            ),
+        )
+        if suppressed:
+            receiving_query = receiving_query.filter(
+                ~func.lower(models.Contact.email).in_(suppressed))
+        receiving = receiving_query.count()
+        if page_size > 0:
+            size = max(1, min(int(page_size), 250))
+            pages = max(1, (total + size - 1) // size)
+            current_page = max(1, min(int(page or 1), pages))
+            pairs = (base.order_by(models.Contact.email)
+                     .offset((current_page - 1) * size).limit(size).all())
+        else:
+            pairs = base.order_by(models.Contact.email).all()
+            size, pages, current_page = total or 1, 1, 1
+
+    out_rows = []
     for c, m in pairs:
         d = _member_dict(c, m)
         why = ""
@@ -502,65 +573,105 @@ def audience_contacts(audience_id: int, tags: str = "", tag_match: str = "any", 
             why = c.email_reason or "address cannot receive mail"
         d["will_receive"] = not why
         d["excluded_reason"] = why
-        if not why:
-            receiving += 1
         out_rows.append(d)
 
-    return {"audience": {"id": a.id, "name": a.name}, "count": len(out_rows),
-            "will_receive": receiving, "excluded": len(out_rows) - receiving,
+    return {"audience": {"id": a.id, "name": a.name}, "count": total,
+            "will_receive": receiving, "excluded": total - receiving,
             "tags": audience_tag_inventory(db, a.id),
             "tags_applied": want, "tag_match": str(tag_match or "any").lower(),
-            "query": needle,
+            "query": needle, "page": current_page, "page_size": size, "pages": pages,
             "contacts": out_rows}
 
 
 @router.post("/audiences/{audience_id}/contacts", dependencies=[Depends(require_user)])
 def add_audience_contacts(audience_id: int, body: ContactsIn, db: Session = Depends(get_db)):
     a = _audience_or_404(db, audience_id)
-    pairs = _parse_pasted(body.text, body.emails)
-    if not pairs:
+    raw_pairs = _parse_pasted(body.text, body.emails)
+    if not raw_pairs:
         raise HTTPException(status_code=400, detail="No contacts supplied")
 
-    existing_ids = {m.contact_id for m in
-                    db.query(models.AudienceMember).filter(models.AudienceMember.audience_id == a.id).all()}
-    added, updated, skipped, bad = 0, 0, 0, []
-    for email, name in pairs:
+    # Normalise and de-duplicate before touching the database. A CSV with thousands
+    # of rows should still need a fixed number of SQL queries, not one lookup for
+    # every address.
+    unique = {}
+    bad = []
+    for email, name in raw_pairs:
         if not EMAIL_RE.match(email):
             bad.append(email or "(blank)")
             continue
-        before = db.query(models.Contact).filter(models.Contact.email == email).first()
-        # Tags are NOT written on the contact - they belong to this audience only.
-        contact = upsert_contact(db, email, name=name, tags=[], source=body.source or "manual")
-        if before is None:
+        if email not in unique or name:
+            unique[email] = name or unique.get(email, "")
+    pairs = list(unique.items())
+    if not pairs:
+        raise HTTPException(status_code=400, detail="No valid contacts supplied")
+
+    emails = [email for email, _ in pairs]
+    existing = {
+        contact.email: contact
+        for contact in (db.query(models.Contact)
+                        .filter(models.Contact.email.in_(emails))
+                        .execution_options(include_trashed=True).all())
+    }
+    added = 0
+    updated = 0
+    accepted = []
+    source = body.source or "manual"
+    for email, name in pairs:
+        contact = existing.get(email)
+        if contact is None:
+            contact = models.Contact(email=email, name=(name or "").strip(), tags=[], source=source)
+            db.add(contact)
+            existing[email] = contact
             added += 1
         else:
             updated += 1
-        if contact.id not in existing_ids:
+            if contact.deleted_at:
+                contact.deleted_at = ""
+            if name:
+                contact.name = name.strip()
+            if source and not contact.source:
+                contact.source = source
+        accepted.append(contact)
+
+    db.flush()
+    accepted_ids = [contact.id for contact in accepted]
+    memberships = {
+        membership.contact_id: membership
+        for membership in (db.query(models.AudienceMember)
+                           .filter(models.AudienceMember.audience_id == a.id,
+                                   models.AudienceMember.contact_id.in_(accepted_ids)).all())
+    }
+    skipped = 0
+    member_tags = normalise_tags(body.tags)
+    for contact in accepted:
+        membership = memberships.get(contact.id)
+        if membership is None:
             db.add(models.AudienceMember(audience_id=a.id, contact_id=contact.id,
-                                         tags=normalise_tags(body.tags)))
-            existing_ids.add(contact.id)
+                                         tags=list(member_tags)))
         else:
             # Already in this list - merge the tags onto its membership instead.
-            mem = (db.query(models.AudienceMember)
-                   .filter(models.AudienceMember.audience_id == a.id,
-                           models.AudienceMember.contact_id == contact.id).first())
-            if mem and body.tags:
-                mem.tags = normalise_tags(list(mem.tags or []) + list(body.tags))
+            if member_tags:
+                membership.tags = normalise_tags(list(membership.tags or []) + member_tags)
             skipped += 1
+
+    # An explicit import is allowed to revive an address that was previously
+    # purged. Release matching tombstones in one statement instead of one query per
+    # contact.
+    (db.query(models.Purge)
+       .filter(models.Purge.kind == "contact", func.lower(models.Purge.identifier).in_(emails))
+       .delete(synchronize_session=False))
 
     # Verify what we just accepted, so the list shows a real deliverability state
     # instead of a hopeful one. DNS lookups are cached per domain.
     from . import email_validator as ev
-    good = [e for e, _ in pairs if EMAIL_RE.match(e)]
-    fresh = (db.query(models.Contact).filter(models.Contact.email.in_(good)).all() if good else [])
     verification = ev.summarise([])
-    if fresh:
-        stamp = _stamp()
-        results = ev.validate_many([c.email for c in fresh])
+    if accepted:
+        checked_at = _stamp()
+        results = ev.validate_many([contact.email for contact in accepted])
         by_email = {r["email"]: r for r in results}
-        for c in fresh:
-            if c.email in by_email:
-                _apply_verdict(c, by_email[c.email], stamp)
+        for contact in accepted:
+            if contact.email in by_email:
+                _apply_verdict(contact, by_email[contact.email], checked_at)
         verification = ev.summarise(results)
 
     db.commit()

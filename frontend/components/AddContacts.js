@@ -57,6 +57,104 @@ function parseSheetPaste(text) {
     });
 }
 
+function splitCsvRow(line) {
+  const cells = [];
+  let value = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === "," && !quoted) {
+      cells.push(value.trim());
+      value = "";
+    } else {
+      value += character;
+    }
+  }
+  cells.push(value.trim());
+  return cells;
+}
+
+function parseCsv(text) {
+  const rows = String(text || "").replace(/^\uFEFF/, "")
+    .split(/\r?\n/).filter((line) => line.trim()).map(splitCsvRow);
+  if (!rows.length) return [];
+  const header = rows[0].map((cell) => cell.toLowerCase().replace(/[^a-z]/g, ""));
+  const emailHeader = header.findIndex((cell) => cell === "email" || cell === "emailaddress");
+  const nameHeader = header.findIndex((cell) =>
+    ["name", "fullname", "contactname", "audiencename"].includes(cell));
+  const hasHeader = emailHeader >= 0;
+  return rows.slice(hasHeader ? 1 : 0).map((cells) => {
+    const detectedEmail = cells.findIndex((cell) => EMAIL_RE.test(cleanEmail(cell)));
+    const emailIndex = hasHeader ? emailHeader : detectedEmail;
+    const fallbackName = cells.find((cell, index) => index !== emailIndex && cell) || "";
+    return {
+      name: nameHeader >= 0 ? (cells[nameHeader] || "").trim() : fallbackName.trim(),
+      email: emailIndex >= 0 ? cleanEmail(cells[emailIndex]) : "",
+    };
+  }).filter((row) => row.name || row.email);
+}
+
+function prepareRows(rows) {
+  const seen = new Set();
+  const valid = [];
+  let duplicates = 0;
+  let invalid = 0;
+  (rows || []).forEach((row) => {
+    const email = cleanEmail(row.email);
+    if (!EMAIL_RE.test(email)) {
+      invalid += 1;
+      return;
+    }
+    if (seen.has(email)) {
+      duplicates += 1;
+      return;
+    }
+    seen.add(email);
+    valid.push({ name: String(row.name || "").trim(), email });
+  });
+  return { valid, duplicates, invalid };
+}
+
+function ImportPreview({ preview, rows, emptyText }) {
+  if (!rows.length) return <div className="audience-import-empty">{emptyText}</div>;
+  return (
+    <>
+      <div className="audience-sheet-summary">
+        <span className="badge b-success">{preview.valid.length} ready</span>
+        {preview.duplicates ? <span className="badge b-warn">{preview.duplicates} duplicate</span> : null}
+        {preview.invalid ? <span className="badge b-danger">{preview.invalid} invalid</span> : null}
+      </div>
+      <div className="audience-import-preview">
+        <table className="t">
+          <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Status</th></tr></thead>
+          <tbody>
+            {rows.slice(0, 12).map((row, index) => {
+              const email = cleanEmail(row.email);
+              const valid = EMAIL_RE.test(email);
+              return (
+                <tr key={`${email}-${index}`}>
+                  <td className="mono">{index + 1}</td>
+                  <td>{row.name || <span className="hint">No name</span>}</td>
+                  <td className="mono">{email || <span className="hint">Missing</span>}</td>
+                  <td><span className={`badge ${valid ? "b-success" : "b-danger"}`}>{valid ? "ready" : "invalid"}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > 12 ? <div className="hint audience-import-more">Previewing 12 of {rows.length} rows.</div> : null}
+    </>
+  );
+}
+
 export default function AddContacts({ audienceId, tagOptions = [], onAdded, disabled = false }) {
   const rowId = useRef(1);
   const requestId = useRef(0);
@@ -74,6 +172,13 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [sourceMode, setSourceMode] = useState("sheet");
+  const [quickText, setQuickText] = useState("");
+  const [csvRows, setCsvRows] = useState([]);
+  const [csvName, setCsvName] = useState("");
+  const [csvError, setCsvError] = useState("");
+  const quickPreview = useMemo(() => prepareRows(parseSheetPaste(quickText)), [quickText]);
+  const csvPreview = useMemo(() => prepareRows(csvRows), [csvRows]);
 
   const enteredRows = useMemo(
     () => sheetRows
@@ -161,6 +266,13 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
     setError("");
   }
 
+  function resetImports() {
+    setQuickText("");
+    setCsvRows([]);
+    setCsvName("");
+    setCsvError("");
+  }
+
   function updateRow(id, field, value) {
     setSheetRows((rows) => rows.map((row) => row.id === id ? { ...row, [field]: value } : row));
     setResult(null);
@@ -215,25 +327,57 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
     setError("");
   }
 
-  async function submit() {
-    if (!willAdd.length) return;
+  async function saveRows(rows, source = "manual") {
+    const prepared = prepareRows(rows);
+    if (!prepared.valid.length) {
+      setError("No valid email addresses found");
+      return;
+    }
     setBusy(true);
     setError("");
     setResult(null);
     try {
       const response = await api.addAudienceContacts(audienceId, {
-        emails: willAdd.map((row) => row.name ? `${row.name} <${row.email}>` : row.email),
+        emails: prepared.valid.map((row) => row.name ? `${row.name} <${row.email}>` : row.email),
         tags,
+        source,
       });
       setResult(response);
       setSheetRows(Array.from({ length: STARTING_ROWS }, () => blankRow()));
       setTags([]);
       setVerdicts({});
+      resetImports();
       if (onAdded) await onAdded(response);
     } catch (submitError) {
       setError(submitError.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function submit() {
+    await saveRows(willAdd, "manual");
+  }
+
+  async function readCsv(event) {
+    const file = event.target.files?.[0];
+    setCsvError("");
+    setCsvRows([]);
+    setCsvName(file?.name || "");
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setCsvError("Please choose a .csv file");
+      return;
+    }
+    try {
+      const parsed = parseCsv(await file.text());
+      if (!parsed.length) {
+        setCsvError("No contact rows found in this CSV");
+        return;
+      }
+      setCsvRows(parsed);
+    } catch {
+      setCsvError("Could not read this CSV file");
     }
   }
 
@@ -253,14 +397,37 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
       <div className="audience-sheet-head">
         <div>
           <h4>Add audience contacts</h4>
-          <p>Enter one person per row, or paste Name and Email columns from Excel or Google Sheets.</p>
+          <p>Use a spreadsheet-style grid, quick paste, or preview a CSV before saving.</p>
         </div>
-        <button type="button" className="btn btn-secondary" onClick={() => addRows(5)} disabled={disabled || busy}>
-          + Add 5 rows
-        </button>
+        {sourceMode === "sheet" ? (
+          <button type="button" className="btn btn-secondary" onClick={() => addRows(5)} disabled={disabled || busy}>
+            + Add 5 rows
+          </button>
+        ) : null}
       </div>
 
-      <div className="audience-sheet-wrap">
+      <div className="audience-import-tabs" role="tablist" aria-label="Contact import method">
+        {[
+          ["sheet", "Sheet"],
+          ["quick", "Quick paste"],
+          ["csv", "CSV upload"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={sourceMode === value}
+            className={sourceMode === value ? "on" : ""}
+            onClick={() => { setSourceMode(value); setError(""); setResult(null); }}
+            disabled={disabled || busy}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {sourceMode === "sheet" ? <>
+        <div className="audience-sheet-wrap">
         <table className="audience-sheet">
           <thead>
             <tr>
@@ -307,34 +474,60 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
             })}
           </tbody>
         </table>
-      </div>
-
-      <div className="audience-sheet-toolbar">
-        <button type="button" className="btn btn-secondary" onClick={() => addRows()} disabled={disabled || busy}>+ Add row</button>
-        <span className="hint">Tip: copy two columns from a spreadsheet, click the first Name cell, then paste.</span>
-      </div>
-
-      {enteredRows.length ? (
-        <div className="audience-sheet-summary">
-          <span className="badge b-neutral">{enteredRows.length} entered</span>
-          {counts.valid ? <span className="badge b-success">{counts.valid} ready</span> : null}
-          {counts.role ? <span className="badge b-warn">{counts.role} role inbox</span> : null}
-          {counts.disposable ? <span className="badge b-warn">{counts.disposable} disposable</span> : null}
-          {blockedCount ? <span className="badge b-danger">{blockedCount} blocked</span> : null}
-          {duplicateCount ? <span className="badge b-warn">{duplicateCount} duplicate</span> : null}
-          {checking || stillChecking ? <span className="sheet-checking"><span className="spinner" /> checking…</span> : null}
-          {blockedCount ? <button type="button" className="sheet-summary-action danger" onClick={() => removeMatching((row) => row.blocked)}>Remove blocked</button> : null}
-          {duplicateCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.duplicate)}>Remove duplicates</button> : null}
-          {riskyCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.status === "disposable" || row.status === "role")}>Remove risky</button> : null}
         </div>
-      ) : null}
 
-      {blockedCount ? (
-        <label className="audience-skip-blocked">
-          <input type="checkbox" checked={skipBlocked} onChange={(event) => setSkipBlocked(event.target.checked)} disabled={disabled} />
-          Skip {blockedCount} address{blockedCount !== 1 ? "es" : ""} that cannot receive mail
-        </label>
-      ) : null}
+        <div className="audience-sheet-toolbar">
+          <button type="button" className="btn btn-secondary" onClick={() => addRows()} disabled={disabled || busy}>+ Add row</button>
+          <span className="hint">Tip: copy two columns from a spreadsheet, click the first Name cell, then paste.</span>
+        </div>
+
+        {enteredRows.length ? (
+          <div className="audience-sheet-summary">
+            <span className="badge b-neutral">{enteredRows.length} entered</span>
+            {counts.valid ? <span className="badge b-success">{counts.valid} ready</span> : null}
+            {counts.role ? <span className="badge b-warn">{counts.role} role inbox</span> : null}
+            {counts.disposable ? <span className="badge b-warn">{counts.disposable} disposable</span> : null}
+            {blockedCount ? <span className="badge b-danger">{blockedCount} blocked</span> : null}
+            {duplicateCount ? <span className="badge b-warn">{duplicateCount} duplicate</span> : null}
+            {checking || stillChecking ? <span className="sheet-checking"><span className="spinner" /> checking...</span> : null}
+            {blockedCount ? <button type="button" className="sheet-summary-action danger" onClick={() => removeMatching((row) => row.blocked)}>Remove blocked</button> : null}
+            {duplicateCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.duplicate)}>Remove duplicates</button> : null}
+            {riskyCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.status === "disposable" || row.status === "role")}>Remove risky</button> : null}
+          </div>
+        ) : null}
+
+        {blockedCount ? (
+          <label className="audience-skip-blocked">
+            <input type="checkbox" checked={skipBlocked} onChange={(event) => setSkipBlocked(event.target.checked)} disabled={disabled} />
+            Skip {blockedCount} address{blockedCount !== 1 ? "es" : ""} that cannot receive mail
+          </label>
+        ) : null}
+      </> : sourceMode === "quick" ? (
+        <div className="audience-import-panel">
+          <label htmlFor="quick-contact-paste">Paste contacts</label>
+          <textarea
+            id="quick-contact-paste"
+            className="input audience-quick-paste"
+            value={quickText}
+            onChange={(event) => { setQuickText(event.target.value); setResult(null); setError(""); }}
+            placeholder={'Rahim Uddin <rahim@company.com>\nKarim Ahmed, karim@company.com\nname@company.com'}
+            disabled={disabled || busy}
+          />
+          <div className="hint">One person per line. Supports Email, Name &lt;email&gt;, or Name, Email.</div>
+          <ImportPreview preview={quickPreview} rows={parseSheetPaste(quickText)} emptyText="Paste contacts above to preview them before saving." />
+        </div>
+      ) : (
+        <div className="audience-import-panel">
+          <label htmlFor="audience-csv">Choose CSV file</label>
+          <div className="audience-csv-picker">
+            <input id="audience-csv" type="file" accept=".csv,text/csv" onChange={readCsv} disabled={disabled || busy} />
+            <span className="hint">Use columns named Name and Email. A header row is recommended.</span>
+          </div>
+          {csvName ? <div className="audience-csv-name"><b>{csvName}</b> · {csvRows.length} row(s) read</div> : null}
+          {csvError ? <div className="note n-warn"><span>{csvError}</span></div> : null}
+          <ImportPreview preview={csvPreview} rows={csvRows} emptyText="Choose a CSV to see a preview. Nothing is saved until you confirm." />
+        </div>
+      )}
 
       <div style={{ marginTop: 16 }}>
         <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
@@ -364,11 +557,25 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
       ) : null}
 
       <div className="audience-sheet-actions">
-        <button className="btn btn-primary" type="button" onClick={submit} disabled={disabled || busy || !willAdd.length || stillChecking}>
-          {busy ? "Adding…" : stillChecking ? "Checking…" : `Add ${willAdd.length} contact${willAdd.length !== 1 ? "s" : ""}`}
-        </button>
-        {enteredRows.length ? <button className="btn btn-secondary" type="button" onClick={reset} disabled={busy}>Clear sheet</button> : null}
-        {duplicateCount ? <span className="hint">Duplicate rows are skipped automatically.</span> : null}
+        {sourceMode === "sheet" ? <>
+          <button className="btn btn-primary" type="button" onClick={submit} disabled={disabled || busy || !willAdd.length || stillChecking}>
+            {busy ? "Adding..." : stillChecking ? "Checking..." : `Add ${willAdd.length} contact${willAdd.length !== 1 ? "s" : ""}`}
+          </button>
+          {enteredRows.length ? <button className="btn btn-secondary" type="button" onClick={reset} disabled={busy}>Clear sheet</button> : null}
+          {duplicateCount ? <span className="hint">Duplicate rows are skipped automatically.</span> : null}
+        </> : sourceMode === "quick" ? <>
+          <button className="btn btn-primary" type="button" onClick={() => saveRows(quickPreview.valid, "quick-paste")} disabled={disabled || busy || !quickPreview.valid.length}>
+            {busy ? "Adding..." : `Add ${quickPreview.valid.length} contact${quickPreview.valid.length !== 1 ? "s" : ""}`}
+          </button>
+          {quickText ? <button className="btn btn-secondary" type="button" onClick={() => setQuickText("")} disabled={busy}>Clear paste</button> : null}
+          {quickPreview.duplicates || quickPreview.invalid ? <span className="hint">Duplicate and invalid rows will be skipped.</span> : null}
+        </> : <>
+          <button className="btn btn-primary" type="button" onClick={() => saveRows(csvPreview.valid, `csv:${csvName || "upload"}`)} disabled={disabled || busy || !csvPreview.valid.length}>
+            {busy ? "Saving..." : `Confirm & save ${csvPreview.valid.length} contact${csvPreview.valid.length !== 1 ? "s" : ""}`}
+          </button>
+          {csvName ? <button className="btn btn-secondary" type="button" onClick={resetImports} disabled={busy}>Clear CSV</button> : null}
+          {csvPreview.duplicates || csvPreview.invalid ? <span className="hint">Duplicate and invalid rows will be skipped.</span> : null}
+        </>}
       </div>
     </div>
   );
