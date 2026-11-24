@@ -489,6 +489,7 @@ def _send_one(db, campaign, row, email, token):
         headline=row.get("subject") or campaign.title or "",
         unsubscribe_url=unsubscribe_url(token),
         force_cta_url=forced_cta,
+        signer_name=campaign.sender_name or "",
     )
     # Our own pixel and click redirects. The provider's tracking is switched off below:
     # it cannot be read back (their message lookup hangs and their webhook never

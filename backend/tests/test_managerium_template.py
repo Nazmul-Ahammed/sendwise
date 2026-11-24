@@ -28,12 +28,15 @@ Another Sender""",
             product="managerium",
             headline="Manage Your Business Operations From One Connected Platform",
             unsubscribe_url="https://example.com/unsubscribe",
+            signer_name="Managerium Campaign Sender",
         )
 
         self.assertIn("<!-- Managerium ERP Email Template -->", html)
         self.assertIn("All-in-One ERP Solution", html)
         self.assertIn("An iBOS Business Solution by AKIJ Resource", html)
-        self.assertIn("Sayadul Islam Chowdhury", html)
+        self.assertIn("Managerium Campaign Sender", html)
+        self.assertNotIn("Sayadul Islam Chowdhury", html)
+        self.assertNotIn("Another Sender", html)
         self.assertIn("width=\"120\"", html)
         self.assertIn("background:#183870", html)
         self.assertIn("Book a Demo", html)
@@ -45,12 +48,13 @@ Another Sender""",
         with patch.object(copy_engine, "_llm_generate", return_value=None):
             result = copy_engine.generate(
                 "Managerium ERP",
-                sender_name="Sayadul Islam Chowdhury",
+                sender_name="Managerium Campaign Sender",
                 campaign_slug="managerium-template-proof",
             )
         self.assertIn("<!-- Managerium ERP Email Template -->", result["body_html"])
         self.assertIn("All-in-One ERP Solution", result["body_html"])
         self.assertIn("An iBOS Business Solution by AKIJ Resource", result["body_html"])
+        self.assertIn("Managerium Campaign Sender", result["body_html"])
 
     def test_other_products_keep_the_standard_template(self):
         html = body_to_html("Hi there,\n\nHello", product="ibos", headline="Hello")

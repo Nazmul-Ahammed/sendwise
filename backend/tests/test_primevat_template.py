@@ -16,7 +16,7 @@ class PrimeVATTemplateTests(unittest.TestCase):
         self.assertEqual(spec["tag"], "Smart VAT Compliance")
         self.assertEqual(spec["footer"], "An iBOS VAT Management Solution")
         self.assertEqual(spec["logo_width"], 130)
-        self.assertEqual(spec["signer"], "Sayadul Islam Chowdhury")
+        self.assertNotIn("signer", spec)
 
     def test_primevat_content_is_rendered_inside_approved_template(self):
         html = body_to_html(
@@ -35,12 +35,14 @@ Another Sender""",
             product="primevat",
             headline="Simplify VAT Management With One Centralized System",
             unsubscribe_url="https://example.com/unsubscribe",
+            signer_name="PrimeVAT Campaign Sender",
         )
 
         self.assertIn("<!-- PrimeVAT Email Template -->", html)
         self.assertIn("Smart VAT Compliance", html)
         self.assertIn("An iBOS VAT Management Solution", html)
-        self.assertIn("Sayadul Islam Chowdhury", html)
+        self.assertIn("PrimeVAT Campaign Sender", html)
+        self.assertNotIn("Sayadul Islam Chowdhury", html)
         self.assertNotIn("Another Sender", html)
         self.assertIn('width="130"', html)
         self.assertIn("background:#183870", html)

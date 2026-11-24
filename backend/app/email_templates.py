@@ -361,8 +361,9 @@ BRANDS = {
 
 # Products that have a user-approved email design. When a product is listed here its
 # compiled HTML shell follows that approved design exactly: the name, the tagline, the
-# embedded logo asset, the CTA geometry, the signer and the footer line all come from
-# this record, never from the generic brand palette. The canonical HTML lives in
+# embedded logo asset, CTA geometry and footer line come from this record, never from
+# the generic brand palette. The signer always comes from the campaign brief's
+# "Sender name (From)" value. The canonical HTML lives in
 # brand_docs so the renderer and the approved artwork cannot drift apart.
 APPROVED_TEMPLATES = {
     "managerium": {
@@ -373,7 +374,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- Managerium ERP Email Template -->",
         "logo_width": 120,
         "cta_pad_x": 28,
-        "signer": "Sayadul Islam Chowdhury",
     },
     "primevat": {
         "file": "primevat-email-template.html",
@@ -383,7 +383,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- PrimeVAT Email Template -->",
         "logo_width": 130,
         "cta_pad_x": 28,
-        "signer": "Sayadul Islam Chowdhury",
         # The approved artwork is drawn in #183870, not the generic #1C2880 palette,
         # so the border, headline, button and footer match the supplied design.
         "primary": "#183870",
@@ -396,7 +395,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- PeopleDesk Email Template -->",
         "logo_width": 130,
         "cta_pad_x": 28,
-        "signer": "Sayadul Islam Chowdhury",
         "primary": "#34a853",
     },
     "trackforce": {
@@ -407,7 +405,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- TrackForce Email Template -->",
         "logo_width": 130,
         "cta_pad_x": 28,
-        "signer": "Team TrackForce",
         "primary": "#2563EB",
     },
     "travilo": {
@@ -419,7 +416,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- Travilo Email Template -->",
         "logo_width": 130,
         "cta_pad_x": 28,
-        "signer": "Team Travilo",
         "primary": "#3954aa",
     },
     "turbo": {
@@ -430,7 +426,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- Turbo Add-ons Email Template -->",
         "logo_width": 220,
         "cta_pad_x": 24,
-        "signer": "Team Turbo Add-ons",
         "primary": "#2e3192",
     },
     "turbo_guard": {
@@ -441,7 +436,6 @@ APPROVED_TEMPLATES = {
         "marker": "<!-- Turbo Guard Email Template -->",
         "logo_width": 42,
         "cta_pad_x": 24,
-        "signer": "Team Turbo Guard",
         "primary": "#2f7df4",
         # This approved design uses a TG text mark instead of an embedded image.
         "logo_required": False,
@@ -619,7 +613,7 @@ def _tint(hex_color, ratio=0.78):
 
 
 def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1, headline="",
-                 unsubscribe_url="", force_cta_url=""):
+                 unsubscribe_url="", force_cta_url="", signer_name=""):
     """Render the standard branded email around the plain-text body.
 
     `variant` is accepted for backwards compatibility only: the design is now a
@@ -628,6 +622,8 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
     `unsubscribe_url`, when given, renders the compliance unsubscribe line.
     `force_cta_url` replaces every parsed plain-text CTA destination. It is used for
     product destinations and UTM rules that must also apply to older saved campaigns.
+    `signer_name` is the campaign brief's "Sender name (From)" and takes priority over
+    any stale sign-off stored inside an older email body.
     """
     b, c = brand_config(product)
     approved = APPROVED_TEMPLATES.get(product)
@@ -866,9 +862,9 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
                 'align="center" style="margin:2px auto 0;"><tr>' + cells + '</tr></table>'
             )
 
-    default_signer = approved["signer"] if approved else brand_name.title()
+    final_signer = str(signer_name or "").strip() or signer or brand_name.title()
     parts.append(f'<p style="margin:28px 0 0;font-size:14px;color:{text_color};">'
-                 f'Best regards,<br>{_esc(default_signer if approved else (signer or default_signer))}</p>')
+                 f'Best regards,<br>{_esc(final_signer)}</p>')
 
     if unsubscribe_url:
         parts.append(

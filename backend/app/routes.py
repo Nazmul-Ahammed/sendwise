@@ -307,7 +307,8 @@ def _final_html(c, e, unsubscribe_url=""):
     )
     return body_to_html(body, product_key_for(c.product), variant=e.get("journey_phase", 1),
                         headline=(e.get("subject") or c.title or "").strip(),
-                        unsubscribe_url=unsubscribe_url, force_cta_url=forced_cta)
+                        unsubscribe_url=unsubscribe_url, force_cta_url=forced_cta,
+                        signer_name=c.sender_name or "")
 
 
 def _normalise_emails(emails):
@@ -2976,7 +2977,8 @@ def update_emails(slug: str, body: EmailsIn, db: Session = Depends(get_db)):
                 e["cta_url"] = forced_cta
             e["body_html"] = body_to_html(txt, product_key_for(c.product), variant=e.get("journey_phase", 1),
                                           headline=(e.get("subject") or c.title or "").strip(),
-                                          force_cta_url=forced_cta)
+                                          force_cta_url=forced_cta,
+                                          signer_name=c.sender_name or "")
     db.commit()
     return _campaign_dict(c, db)
 

@@ -27,11 +27,13 @@ class BrandEmailTemplateTests(unittest.TestCase):
                     "Hi there,\n\nA brand-specific message.",
                     product=product,
                     headline="Brand template proof",
+                    signer_name="Sender From Brief",
                 )
                 self.assertIn(f"<!-- {marker} -->", html)
                 self.assertIn(tagline, html)
                 self.assertIn(escape(spec["footer"]), html)
-                self.assertIn(spec["signer"], html)
+                self.assertIn("Sender From Brief", html)
+                self.assertNotIn("signer", spec)
 
 
 if __name__ == "__main__":
