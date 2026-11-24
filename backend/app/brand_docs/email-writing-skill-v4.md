@@ -114,7 +114,7 @@ logo and tagline change per product; **the layout does not.**
   identical for every stage; only the copy changes.
 - **H1 = the subject.** Do not repeat any other subject or preview text as body copy.
 - Every CTA URL carries the unique UTM (Section 81 rules) -
-  `utm_source=sendclean&utm_medium=email&utm_campaign={product}_{campaign}_open_sequence&utm_content={ref}_bottom_primary_{purpose}`.
+  `utm_source=Sendwise&utm_medium=Email Marketing&utm_campaign={campaign_name}&utm_term=Winter_Sale&utm_content={ref}_bottom_primary_{purpose}`.
 - **The provider does NOT inject a compliance footer.** SendClean adds no unsubscribe or
   physical-address text, so the operator must supply both. Never assume the ESP adds them.
 - Bangla-targeted products keep Bangla body copy; the greeting stays "Hi there,"/"Hi," and the
@@ -139,17 +139,17 @@ locked base URLs:
 | Product | CTA button base URL |
 |---|---|
 | Managerium ERP | `https://ibos.io/managerium/#managerium-erp-demo` |
-| PeopleDesk | `https://ibos.io/best-hr-software-in-bangladesh/#peopledesk-demo` |
+| PeopleDesk | `https://ibos.io/best-hr-software-in-bangladesh/#demo` |
 | PrimeVAT | `https://ibos.io/vat-management-software-solution-primevat/#demo` |
-| TrackForce | `https://trackforce.io/start-free-trial` |
-| Travilo | `https://travilo.io/#demo` |
+| TrackForce | `https://trackforce.io/contact` |
+| Travilo | `https://travilo.io/book-your-free-demo-form` |
 | Turbo Add-ons | `https://turbo-addons.com/pricing/` |
 
 When a URL contains a `#fragment`, UTM query parameters are inserted BEFORE the
 fragment (Section 81.4), e.g.:
 
 ```
-https://ibos.io/managerium/?utm_source=sendclean&utm_medium=email&utm_campaign=managerium_<campaign>_open_sequence&utm_content=<ref>_<position>_<purpose>#managerium-erp-demo
+https://ibos.io/managerium/?utm_source=Sendwise&utm_medium=Email+Marketing&utm_campaign=<campaign_name>&utm_term=Winter_Sale&utm_content=<ref>_<position>_<purpose>#managerium-erp-demo
 ```
 
 ## 0.6 Conversion sequence progression (mandatory)
@@ -3122,24 +3122,25 @@ Even when multiple CTA buttons point to the same destination page, each button m
 Default:
 
 ```text
-utm_source=sendclean
-utm_medium=email
-utm_campaign={product_slug}_{journey_slug}_{campaign_slug}
+utm_source=Sendwise
+utm_medium=Email Marketing
+utm_campaign={campaign_name}
+utm_term=Winter_Sale
 utm_content={email_id}_{cta_position}_{cta_purpose}
 ```
 
-Optional `utm_term` may be used only when there is a clear analytical need. Do not add parameters merely for complexity.
+`utm_term=Winter_Sale` is mandatory for every Sendwise email CTA.
 
 Example:
 
 ```text
-https://turbo-addons.com/pricing/?utm_source=sendclean&utm_medium=email&utm_campaign=turbo_addons_activated_user_upgrade&utm_content=email_01_top_primary_upgrade
+https://turbo-addons.com/pricing/?utm_source=Sendwise&utm_medium=Email+Marketing&utm_campaign=Activated+User+Upgrade&utm_term=Winter_Sale&utm_content=email_01_top_primary_upgrade
 ```
 
 If Email 1 has another button to the same pricing page:
 
 ```text
-https://turbo-addons.com/pricing/?utm_source=sendclean&utm_medium=email&utm_campaign=turbo_addons_activated_user_upgrade&utm_content=email_01_bottom_primary_upgrade
+https://turbo-addons.com/pricing/?utm_source=Sendwise&utm_medium=Email+Marketing&utm_campaign=Activated+User+Upgrade&utm_term=Winter_Sale&utm_content=email_01_bottom_primary_upgrade
 ```
 
 ## 81.2 Required uniqueness dimensions

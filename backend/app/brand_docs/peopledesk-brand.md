@@ -12,7 +12,7 @@ hook: Your HR team should manage people, not spend every month correcting attend
 problem: Manual attendance, scattered employee files and separate payroll sheets create errors, delays and avoidable follow-ups.
 solution: PeopleDesk connects attendance, leave, payroll, employee records, shifts, rosters and self-service in one AI-driven HRM platform - so payroll is accurate and HR has real-time visibility.
 cta: Book a demo
-cta_url: https://ibos.io/best-hr-software-in-bangladesh/#peopledesk-demo
+cta_url: https://ibos.io/best-hr-software-in-bangladesh/#demo
 proof_1: 30k+ employees managed daily
 proof_2: 50+ organisations
 proof_3: 99% successful HR & payroll implementation

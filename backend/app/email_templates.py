@@ -619,13 +619,15 @@ def _tint(hex_color, ratio=0.78):
 
 
 def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1, headline="",
-                 unsubscribe_url=""):
+                 unsubscribe_url="", force_cta_url=""):
     """Render the standard branded email around the plain-text body.
 
     `variant` is accepted for backwards compatibility only: the design is now a
     single consistent template, so it no longer changes any styling.
     `headline` becomes the H1 (the send subject is the natural value).
     `unsubscribe_url`, when given, renders the compliance unsubscribe line.
+    `force_cta_url` replaces every parsed plain-text CTA destination. It is used for
+    product destinations and UTM rules that must also apply to older saved campaigns.
     """
     b, c = brand_config(product)
     approved = APPROVED_TEMPLATES.get(product)
@@ -816,6 +818,13 @@ def body_to_html(body_text, product="turbo", cta_url="", cta_text="", variant=1,
         feature_padding = ' style="padding:5px 17px;"' if is_turbo_guard else ""
         parts.append(f'<table width="100%" cellpadding="0" cellspacing="0" '
                      f'style="{feature_style}"><tr><td{feature_padding}><table width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr></table>')
+
+    if force_cta_url:
+        if cta:
+            cta = (cta[0], force_cta_url)
+        cta_url = force_cta_url
+        ctas = [(text, force_cta_url, own_color, own_text)
+                for text, _, own_color, own_text in ctas]
 
     label, url = cta if cta else (cta_text, cta_url)
     if url and label:

@@ -36,7 +36,7 @@ from . import sending_policy
 from . import tracking
 from . import delivery_ledger as ledger
 from .db import SessionLocal
-from .copy_engine import product_key
+from .copy_engine import locked_cta_url, product_key
 from .email_templates import body_to_html
 
 _log = logging.getLogger("sendwise")
@@ -478,13 +478,17 @@ def _send_one(db, campaign, row, email, token):
         raise RuntimeError("SendClean owner ID, API token and SMTP username must all be configured")
 
     xid = f"sw-seq-{campaign.slug}-{row.get('ref')}-{uuid.uuid4().hex[:10]}"
+    forced_cta = locked_cta_url(
+        campaign.product, campaign.title or campaign.slug, row.get("ref") or "E1",
+    )
     html = body_to_html(
         row.get("body") or "",
         product=product_key(campaign.product),
-        cta_url=row.get("cta_url") or "",
+        cta_url=forced_cta or row.get("cta_url") or "",
         cta_text=row.get("cta_label") or "",
         headline=row.get("subject") or campaign.title or "",
         unsubscribe_url=unsubscribe_url(token),
+        force_cta_url=forced_cta,
     )
     # Our own pixel and click redirects. The provider's tracking is switched off below:
     # it cannot be read back (their message lookup hangs and their webhook never

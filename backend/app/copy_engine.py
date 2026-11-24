@@ -5,12 +5,13 @@ Follows email-writing-skill-v4.md rules (canonical, see brand-docs/):
 - Section 0.3: product copy is read from the product's brand MD file (app/brand_docs/<key>-brand.md).
 - per-product messaging from brand docs (subject system, hook, problem, proof, CTA)
 - UNIQUE UTM for every CTA (Section 81):
-    utm_source=sendclean & utm_medium=email
-    utm_campaign={product_slug}_{campaign_slug}_open_sequence
+    utm_source=Sendwise & utm_medium=Email Marketing
+    utm_campaign={campaign_name} & utm_term=Winter_Sale
     utm_content={email_ref}_{cta_position}_{cta_purpose}
 """
 
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 PRODUCTS = {
     "turbo_guard": {
@@ -43,7 +44,7 @@ PRODUCTS = {
         "solution": "Travilo is the operating system behind modern travel businesses: search, booking, ticketing, deposits, ledgers, travellers, agents and support in one connected platform - so you can run your agency instead of chasing follow-ups.",
         "proof": ["Multi-supplier flight search (GDS, NDC, LCC)", "Full ticket lifecycle visibility", "Deposits, ledgers and partial payments", "B2B partner portal with credit & commission control", "Branded OTA launch", "No per-ticket fee / no revenue share"],
         "cta": "Book a free demo",
-        "cta_url": "https://travilo.io/#demo",
+        "cta_url": "https://travilo.io/book-your-free-demo-form",
         "preview": "See how booking, finance and partners connect in one dashboard.",
     },
     "peopledesk": {
@@ -54,7 +55,7 @@ PRODUCTS = {
         "solution": "PeopleDesk connects attendance, leave, payroll, employee records, shifts, rosters and self-service in one AI-driven HRM platform - so payroll is accurate and HR has real-time visibility.",
         "proof": ["30k+ employees managed daily", "50+ organisations", "99% successful HR & payroll implementation", "GPS & mobile face attendance", "Payslips & self-service in the app", "24/7 support"],
         "cta": "Book a demo",
-        "cta_url": "https://ibos.io/best-hr-software-in-bangladesh/#peopledesk-demo",
+        "cta_url": "https://ibos.io/best-hr-software-in-bangladesh/#demo",
         "preview": "Accurate payroll, connected employees, complete workforce visibility.",
     },
     "managerium": {
@@ -87,7 +88,7 @@ PRODUCTS = {
         "solution": "TrackForce turns daily work activity into clear, actionable insight: real-time dashboards, active vs idle patterns, application and website usage, AI summaries and automated reports.",
         "proof": ["Real-time dashboard", "Active vs idle insight", "App & website usage visibility", "AI daily summaries", "Automated daily/monthly reports", "30-day free trial"],
         "cta": "Start the 30-day free trial",
-        "cta_url": "https://trackforce.io/start-free-trial",
+        "cta_url": "https://trackforce.io/contact",
         "preview": "See how work happens. Improve what matters.",
     },
     "familyguard": {
@@ -169,29 +170,43 @@ _PRODUCT_ALIASES = {
 }
 
 
-def _slugify(s):
-    return re.sub(r"[^a-z0-9]+", "_", (s or "").lower()).strip("_") or "campaign"
-
-
-def _utm_url(base, product_slug, campaign_slug, email_ref, purpose, position="bottom_primary"):
+def _utm_url(base, campaign_name, email_ref, purpose, position="bottom_primary"):
     """Skill Section 81 - unique UTM per CTA button.
 
-    Preserves any #fragment/anchor: UTM query params are inserted BEFORE the
-    fragment (Section 81.4 - never break anchors or existing params).
+    The operator-defined source, medium, campaign name and Winter Sale term are
+    mandatory. Existing unrelated query parameters and any fragment are preserved,
+    while stale UTM values are replaced instead of duplicated.
     """
-    base = base or ""
-    fragment = ""
-    if "#" in base:
-        base, fragment = base.split("#", 1)
-        fragment = "#" + fragment
-    sep = "&" if "?" in base else "?"
-    return (f"{base}{sep}utm_source=sendclean&utm_medium=email"
-            f"&utm_campaign={product_slug}_{_slugify(campaign_slug)}_open_sequence"
-            f"&utm_content={email_ref}_{position}_{purpose}"
-            f"{fragment}")
+    parts = urlsplit(str(base or ""))
+    managed = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+             if key.lower() not in managed]
+    query.extend([
+        ("utm_source", "Sendwise"),
+        ("utm_medium", "Email Marketing"),
+        ("utm_campaign", str(campaign_name or "campaign").strip() or "campaign"),
+        ("utm_term", "Winter_Sale"),
+        ("utm_content", f"{email_ref}_{position}_{purpose}"),
+    ])
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
 
 
-import re
+_LOCKED_CTA_PRODUCTS = {"managerium", "peopledesk", "primevat", "travilo", "trackforce"}
+
+
+def locked_cta_url(product, campaign_name, email_ref="E1", purpose="cta",
+                   position="bottom_primary"):
+    """Authoritative tracked CTA for the five demo/contact products.
+
+    Called again at send time, so an older live campaign cannot send a stale CTA
+    saved before the destination or mandatory UTM policy changed.
+    """
+    key = product_key(product)
+    if key not in _LOCKED_CTA_PRODUCTS:
+        return ""
+    cfg = PRODUCTS[key]
+    return _utm_url(cfg["cta_url"], campaign_name, email_ref, purpose, position)
 
 
 def _normalize_llm_body(body, subject, preview, signer, cta, cta_url, greeting="Hi there,"):
@@ -730,7 +745,8 @@ def _strip_certainty_claims(text):
 
 
 def generate(product, offer="", sender_name="", stage_focus="", audience_name="",
-             email_ref="E1", campaign_slug="campaign", llm_config=None, trend_context=None):
+             email_ref="E1", campaign_slug="campaign", llm_config=None, trend_context=None,
+             campaign_name=None):
     key = product_key(product)
     # Standing author instruction: every Turbo Guard email carries the coffee offer. A
     # campaign created in the UI starts with an empty Offer field, and an empty offer
@@ -796,7 +812,8 @@ def generate(product, offer="", sender_name="", stage_focus="", audience_name=""
                  else cta_spec.format(name=cfg["name"]) if cta_spec else cfg.get("cta") or "Learn more")
     if key == "turbo_guard":
         cta_label = "Get Pro For US$5.55" if coffee_campaign else cfg["cta"]
-    cta_url = _utm_url(cfg["cta_url"], cfg["slug"], campaign_slug, email_ref, journey["purpose"])
+    cta_url = _utm_url(cfg["cta_url"], campaign_name or campaign_slug,
+                       email_ref, journey["purpose"])
     signer = (sender_name or cfg["name"]).strip()
     body_paras = "\n\n".join(b.rstrip() for b in blocks)
     greeting = "Hi there," if phase % 2 else "Hi,"

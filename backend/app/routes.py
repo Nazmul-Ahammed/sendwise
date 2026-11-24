@@ -301,9 +301,13 @@ def _final_html(c, e, unsubscribe_url=""):
     body = (e.get("body") or "").strip()
     if not body:
         body = f"Hi there,\n\nBest regards,\n{c.sender_name or c.product}"
+    from .copy_engine import locked_cta_url
+    forced_cta = locked_cta_url(
+        c.product, c.title or c.slug, e.get("ref") or f"E{e.get('stage') or 1}",
+    )
     return body_to_html(body, product_key_for(c.product), variant=e.get("journey_phase", 1),
                         headline=(e.get("subject") or c.title or "").strip(),
-                        unsubscribe_url=unsubscribe_url)
+                        unsubscribe_url=unsubscribe_url, force_cta_url=forced_cta)
 
 
 def _normalise_emails(emails):
@@ -2960,12 +2964,19 @@ def update_emails(slug: str, body: EmailsIn, db: Session = Depends(get_db)):
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
     c.emails_json = body.emails
+    from .copy_engine import locked_cta_url
     # keep the stored body_html fresh - every edit regenerates the branded design (UI preview + future sends)
     for e in c.emails_json or []:
         txt = (e.get("body") or "").strip()
         if txt:
+            forced_cta = locked_cta_url(
+                c.product, c.title or c.slug, e.get("ref") or f"E{e.get('stage') or 1}",
+            )
+            if forced_cta:
+                e["cta_url"] = forced_cta
             e["body_html"] = body_to_html(txt, product_key_for(c.product), variant=e.get("journey_phase", 1),
-                                          headline=(e.get("subject") or c.title or "").strip())
+                                          headline=(e.get("subject") or c.title or "").strip(),
+                                          force_cta_url=forced_cta)
     db.commit()
     return _campaign_dict(c, db)
 
@@ -3000,7 +3011,8 @@ def generate_copy(slug: str, db: Session = Depends(get_db)):
         focus = e.get("email_name") or e.get("name") or stage_focus
         gen = generate(product=c.product, offer=c.offer, sender_name=c.sender_name, stage_focus=focus,
                        audience_name=c.audience_name, email_ref=email_ref, campaign_slug=c.slug,
-                       llm_config=llm_config, trend_context=trend_context)
+                       llm_config=llm_config, trend_context=trend_context,
+                       campaign_name=c.title or c.slug)
         return {
             "stage": stage,
             "ref": email_ref,

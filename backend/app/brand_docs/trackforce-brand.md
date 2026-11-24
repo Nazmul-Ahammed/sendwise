@@ -12,7 +12,7 @@ hook: You probably know what your team should be doing - but do you have a clear
 problem: Manual reports and status follow-ups hide workload gaps, bottlenecks and inconsistent performance - especially across remote and hybrid teams.
 solution: TrackForce turns daily work activity into clear, actionable insight: real-time dashboards, active vs idle patterns, application and website usage, AI summaries and automated reports.
 cta: Start the 30-day free trial
-cta_url: https://trackforce.io/start-free-trial
+cta_url: https://trackforce.io/contact
 proof_1: Real-time dashboard
 proof_2: Active vs idle insight
 proof_3: App & website usage visibility

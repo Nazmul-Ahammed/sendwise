@@ -298,7 +298,7 @@ def generate_copy(slug: str, llm_provider: str = "active") -> str:
             g = generate(product=c.product, offer=c.offer, sender_name=c.sender_name,
                          stage_focus=focus, audience_name=c.audience_name,
                          email_ref=ref, campaign_slug=c.slug, llm_config=llm_config,
-                         trend_context=trend_context)
+                         trend_context=trend_context, campaign_name=c.title or c.slug)
             return {"stage": stage, "ref": ref, "subject": g["subject"],
                     "preview_text": g["preview_text"], "body": g["body"],
                     "body_html": g["body_html"], "cta_url": g["cta_url"],
