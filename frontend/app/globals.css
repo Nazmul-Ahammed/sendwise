@@ -449,6 +449,66 @@ button.sf-node { cursor: pointer; }
 .form-row { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .form-actions { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s3); }
 
+/* ===== Audience contact sheet ===== */
+.audience-sheet-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  margin-bottom: 12px;
+}
+.audience-sheet-head h4 { margin: 0 0 4px; font-size: 14px; color: var(--ink); }
+.audience-sheet-head p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+.audience-sheet-wrap {
+  width: 100%; max-height: 420px; overflow: auto; border: 1px solid var(--border-strong);
+  border-radius: var(--radius); background: var(--surface); box-shadow: inset 0 1px 2px rgba(15, 23, 42, .03);
+}
+table.audience-sheet { width: 100%; min-width: 660px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+table.audience-sheet th {
+  position: sticky; top: 0; z-index: 2; padding: 9px 10px; text-align: left;
+  background: var(--surface-2); border-bottom: 1px solid var(--border-strong);
+  color: var(--ink-2); font-size: 10.5px; font-weight: 750; letter-spacing: .055em; text-transform: uppercase;
+}
+table.audience-sheet th:nth-child(2) { width: 31%; }
+table.audience-sheet th:nth-child(3) { width: 43%; }
+table.audience-sheet th:nth-child(4) { width: 120px; }
+table.audience-sheet th:last-child { width: 42px; }
+table.audience-sheet th span { color: var(--danger); font-size: 9px; margin-left: 4px; }
+table.audience-sheet td { padding: 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+table.audience-sheet tr:last-child td { border-bottom: 0; }
+table.audience-sheet tbody tr:hover td { background: var(--brand-50, #f7f7ff); }
+table.audience-sheet tr.sheet-row-error td { background: var(--warning-bg); }
+table.audience-sheet input {
+  display: block; width: 100%; min-height: 42px; padding: 9px 10px; border: 0;
+  outline: 0; background: transparent; color: var(--ink); font: 13px var(--font);
+}
+table.audience-sheet input:focus { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand-500); }
+table.audience-sheet input::placeholder { color: var(--ink-4); }
+.sheet-row-number {
+  width: 42px; text-align: center !important; color: var(--ink-4) !important;
+  font-family: var(--mono); font-size: 11px;
+}
+.sheet-status { padding: 0 8px !important; }
+.sheet-status .badge { font-size: 10px; }
+.sheet-remove { text-align: center; }
+.sheet-remove button {
+  width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; color: var(--ink-3); font-size: 17px; cursor: pointer;
+}
+.sheet-remove button:hover { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger); }
+.sheet-remove button:disabled { opacity: .45; cursor: default; }
+.audience-sheet-toolbar, .audience-sheet-actions, .audience-sheet-summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.audience-sheet-toolbar { margin-top: 10px; }
+.audience-sheet-summary { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.sheet-checking { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: 11px; }
+.sheet-checking .spinner { width: 13px; height: 13px; }
+.sheet-summary-action {
+  border: 0; background: transparent; color: var(--brand-600); padding: 3px 5px;
+  font-size: 11px; font-weight: 700; cursor: pointer;
+}
+.sheet-summary-action.danger { color: var(--danger); }
+.audience-skip-blocked { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; cursor: pointer; }
+.audience-sheet-actions { margin-top: 14px; }
+
 /* ===== Notes / alerts ===== */
 .note { display: flex; gap: var(--s3); align-items: flex-start; padding: 14px var(--s4); border-radius: var(--radius); font-size: 13.5px; border: 1px solid; margin-top: var(--s4); line-height: 1.55; }
 .note svg { flex-shrink: 0; margin-top: 2px; }
@@ -532,6 +592,8 @@ button.sf-node { cursor: pointer; }
   .table-wrap { border-radius: 0; }
   .kv { grid-template-columns: 1fr; gap: 2px var(--s3); }
   .kv dt { margin-top: var(--s2); }
+  .audience-sheet-head { flex-direction: column; }
+  .audience-sheet-head .btn { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -7,118 +7,213 @@ import { api } from "../lib/api";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const LIVE_CHECK_LIMIT = 200;
+const STARTING_ROWS = 4;
 
-/** Parse a paste. Accepts "email", "Name <email>" and comma/newline separation. */
-function parseRows(text) {
-  const out = [];
-  const seen = new Set();
-  let duplicates = 0;
-  for (const line of String(text || "").replace(/,/g, "\n").split(/\r?\n/)) {
-    const raw = line.trim();
-    if (!raw) continue;
-    const angled = raw.match(/^(.*)<([^<>]+)>\s*$/);
-    const email = (angled ? angled[2] : raw).trim().toLowerCase();
-    const name = angled ? angled[1].trim().replace(/^["']|["']$/g, "") : "";
-    if (!email) continue;
-    if (seen.has(email)) { duplicates += 1; continue; }
-    seen.add(email);
-    out.push({ email, name, syntaxOk: EMAIL_RE.test(email) });
+function cleanEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function parseContactLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const angled = raw.match(/^(.*)<([^<>]+)>\s*$/);
+  if (angled) {
+    return {
+      name: angled[1].trim().replace(/^["']|["']$/g, ""),
+      email: cleanEmail(angled[2]),
+    };
   }
-  return { rows: out, duplicates };
+  const cells = raw.includes("\t")
+    ? raw.split("\t").map((cell) => cell.trim())
+    : raw.split(",").map((cell) => cell.trim());
+  if (cells.length > 1) {
+    const found = cells.findIndex((cell) => EMAIL_RE.test(cleanEmail(cell)));
+    const emailIndex = found >= 0 ? found : 1;
+    return {
+      name: cells.find((cell, index) => index !== emailIndex && cell) || "",
+      email: cleanEmail(cells[emailIndex]),
+    };
+  }
+  return { name: "", email: cleanEmail(raw) };
+}
+
+function parseSheetPaste(text) {
+  const raw = String(text || "").trim();
+  const commaParts = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  const commaList = !raw.includes("\t")
+    && !raw.includes("\n")
+    && commaParts.length > 1
+    && commaParts.every((part) => {
+      const angled = part.match(/<([^<>]+)>\s*$/);
+      return EMAIL_RE.test(cleanEmail(angled ? angled[1] : part));
+    });
+  const sourceLines = commaList ? commaParts : raw.split(/\r?\n/);
+  return sourceLines
+    .map(parseContactLine)
+    .filter(Boolean)
+    .filter((row, index) => {
+      if (index !== 0) return true;
+      return !(row.name.toLowerCase().includes("name") && row.email.toLowerCase().includes("email"));
+    });
 }
 
 export default function AddContacts({ audienceId, tagOptions = [], onAdded, disabled = false }) {
-  const [text, setText] = useState("");
+  const rowId = useRef(1);
+  const requestId = useRef(0);
+  function blankRow() {
+    return { id: rowId.current++, name: "", email: "" };
+  }
+
+  const [sheetRows, setSheetRows] = useState(() =>
+    Array.from({ length: STARTING_ROWS }, () => blankRow()),
+  );
   const [tags, setTags] = useState([]);
   const [skipBlocked, setSkipBlocked] = useState(true);
-  const [verdicts, setVerdicts] = useState({});   // email -> validation result
+  const [verdicts, setVerdicts] = useState({});
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
-  const reqId = useRef(0);
 
-  const parsed = useMemo(() => parseRows(text), [text]);
-  const rows = parsed.rows;
-
-  // Addresses worth asking the server about: well-formed and not already known.
-  const pending = useMemo(
-    () => rows.filter((r) => r.syntaxOk && !verdicts[r.email]).map((r) => r.email).slice(0, LIVE_CHECK_LIMIT),
-    [rows, verdicts],
+  const enteredRows = useMemo(
+    () => sheetRows
+      .map((row) => ({ ...row, name: row.name.trim(), email: cleanEmail(row.email) }))
+      .filter((row) => row.name || row.email),
+    [sheetRows],
   );
+
+  const decorated = useMemo(() => {
+    const seen = new Set();
+    return enteredRows.map((row) => {
+      const syntaxOk = EMAIL_RE.test(row.email);
+      const duplicate = Boolean(row.email && seen.has(row.email));
+      if (row.email) seen.add(row.email);
+      const verdict = verdicts[row.email];
+      const status = duplicate
+        ? "duplicate"
+        : !syntaxOk
+          ? "invalid"
+          : verdict
+            ? verdict.status
+            : "checking";
+      return {
+        ...row,
+        syntaxOk,
+        duplicate,
+        status,
+        reason: verdict?.reason || "",
+        blocked: isBlocked(status),
+      };
+    });
+  }, [enteredRows, verdicts]);
+
+  const pending = useMemo(() =>
+    decorated
+      .filter((row) => row.syntaxOk && !row.duplicate && !verdicts[row.email])
+      .map((row) => row.email)
+      .slice(0, LIVE_CHECK_LIMIT),
+  [decorated, verdicts]);
   const pendingKey = pending.join(",");
 
-  // Live check, debounced so typing does not fire a request per keystroke.
   useEffect(() => {
     if (!pendingKey) return undefined;
-    const id = ++reqId.current;
+    const id = ++requestId.current;
     const timer = setTimeout(async () => {
       setChecking(true);
       try {
-        const res = await api.validateEmails(pendingKey.split(","));
-        if (id !== reqId.current) return; // a newer paste already superseded this
-        const map = {};
-        (res.results || []).forEach((r) => { map[r.email] = r; });
-        setVerdicts((prev) => ({ ...prev, ...map }));
+        const response = await api.validateEmails(pendingKey.split(","));
+        if (id !== requestId.current) return;
+        const next = {};
+        (response.results || []).forEach((row) => { next[row.email] = row; });
+        setVerdicts((previous) => ({ ...previous, ...next }));
       } catch {
-        /* a failed check must never block adding - rows simply stay "not checked" */
+        // Verification is advisory. Mark this batch as unknown so an unavailable
+        // validator never leaves the sheet permanently stuck on "Checking".
+        const unknown = {};
+        pendingKey.split(",").forEach((email) => {
+          unknown[email] = { email, status: "unknown", reason: "Verification unavailable" };
+        });
+        setVerdicts((previous) => ({ ...previous, ...unknown }));
       } finally {
-        if (id === reqId.current) setChecking(false);
+        if (id === requestId.current) setChecking(false);
       }
     }, 650);
     return () => clearTimeout(timer);
   }, [pendingKey]);
 
+  const counts = decorated.reduce((summary, row) => {
+    summary[row.status] = (summary[row.status] || 0) + 1;
+    return summary;
+  }, {});
+  const duplicateCount = decorated.filter((row) => row.duplicate).length;
+  const blockedCount = decorated.filter((row) => row.blocked).length;
+  const riskyCount = decorated.filter((row) => row.status === "disposable" || row.status === "role").length;
+  const stillChecking = decorated.some((row) => row.status === "checking");
+  const willAdd = decorated.filter((row) =>
+    row.syntaxOk && !row.duplicate && (!skipBlocked || !row.blocked),
+  );
+
   function reset() {
-    setText("");
+    setSheetRows(Array.from({ length: STARTING_ROWS }, () => blankRow()));
     setTags([]);
     setVerdicts({});
     setResult(null);
     setError("");
   }
 
-  function emailOf(line) {
-    const raw = String(line || "").trim();
-    if (!raw) return "";
-    const angled = raw.match(/^(.*)<([^<>]+)>\s*$/);
-    return (angled ? angled[2] : raw).trim().toLowerCase();
-  }
-
-  /** Drop one address by rewriting the paste, so the textarea stays the single truth. */
-  function removeEmail(email) {
-    const kept = String(text || "").replace(/,/g, "\n").split(/\r?\n/)
-      .filter((line) => line.trim() && emailOf(line) !== email);
-    setText(kept.join("\n"));
+  function updateRow(id, field, value) {
+    setSheetRows((rows) => rows.map((row) => row.id === id ? { ...row, [field]: value } : row));
     setResult(null);
     setError("");
   }
 
-  /** Drop every address matching a verdict - one click for a whole page of bad ones. */
-  function removeMatching(predicate) {
-    const kept = String(text || "").replace(/,/g, "\n").split(/\r?\n/).filter((line) => {
-      if (!line.trim()) return false;
-      const row = decorated.find((d) => d.email === emailOf(line));
-      return !(row && predicate(row));
+  function addRows(count = 1) {
+    setSheetRows((rows) => [...rows, ...Array.from({ length: count }, () => blankRow())]);
+  }
+
+  function removeRow(id) {
+    setSheetRows((rows) => {
+      const remaining = rows.filter((row) => row.id !== id);
+      return remaining.length ? remaining : [blankRow()];
     });
-    setText(kept.join("\n"));
     setResult(null);
     setError("");
   }
 
-  const decorated = rows.map((r) => {
-    const v = verdicts[r.email];
-    const status = !r.syntaxOk ? "invalid" : (v ? v.status : "checking");
-    return { ...r, status, reason: v?.reason || "", blocked: isBlocked(status) };
-  });
+  function removeMatching(predicate) {
+    const removeIds = new Set(decorated.filter(predicate).map((row) => row.id));
+    setSheetRows((rows) => {
+      const remaining = rows.filter((row) => !removeIds.has(row.id));
+      return remaining.length ? remaining : [blankRow()];
+    });
+    setResult(null);
+    setError("");
+  }
 
-  const counts = decorated.reduce((acc, r) => {
-    acc[r.status] = (acc[r.status] || 0) + 1;
-    return acc;
-  }, {});
-  const blockedCount = decorated.filter((r) => r.blocked).length;
-  const riskyCount = decorated.filter((r) => r.status === "disposable" || r.status === "role").length;
-  const willAdd = skipBlocked ? decorated.filter((r) => !r.blocked) : decorated;
-  const stillChecking = decorated.some((r) => r.status === "checking");
+  function pasteIntoSheet(event, startIndex) {
+    const clipboard = event.clipboardData.getData("text");
+    const parsed = parseSheetPaste(clipboard);
+    const gridPaste = clipboard.includes("\t")
+      || clipboard.includes("\n")
+      || parsed.length > 1
+      || /<[^<>]+@[^<>]+>\s*$/.test(clipboard.trim());
+    if (!gridPaste || !parsed.length) return;
+    event.preventDefault();
+    setSheetRows((current) => {
+      const next = [...current];
+      while (next.length < startIndex + parsed.length) next.push(blankRow());
+      parsed.forEach((contact, offset) => {
+        next[startIndex + offset] = {
+          ...next[startIndex + offset],
+          name: contact.name,
+          email: contact.email,
+        };
+      });
+      return next;
+    });
+    setResult(null);
+    setError("");
+  }
 
   async function submit() {
     if (!willAdd.length) return;
@@ -126,251 +221,154 @@ export default function AddContacts({ audienceId, tagOptions = [], onAdded, disa
     setError("");
     setResult(null);
     try {
-      const res = await api.addAudienceContacts(audienceId, {
-        emails: willAdd.map((r) => (r.name ? `${r.name} <${r.email}>` : r.email)),
+      const response = await api.addAudienceContacts(audienceId, {
+        emails: willAdd.map((row) => row.name ? `${row.name} <${row.email}>` : row.email),
         tags,
       });
-      setResult(res);
-      setText("");
+      setResult(response);
+      setSheetRows(Array.from({ length: STARTING_ROWS }, () => blankRow()));
       setTags([]);
       setVerdicts({});
-      if (onAdded) await onAdded(res);
-    } catch (e) {
-      setError(e.message);
+      if (onAdded) await onAdded(response);
+    } catch (submitError) {
+      setError(submitError.message);
     } finally {
       setBusy(false);
     }
   }
 
-  const chip = "badge";
+  function statusFor(row) {
+    if (!row.name && !row.email) return <span className="hint">Empty row</span>;
+    if (row.duplicate) return <span className="badge b-warn">duplicate</span>;
+    const verdict = verdictOf(row.status);
+    return (
+      <span className={`badge ${verdict.cls}`} title={row.reason || verdict.tip}>
+        {verdict.label}
+      </span>
+    );
+  }
 
   return (
     <div>
-      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-        Paste addresses - one per line
-        <span className="hint" style={{ fontWeight: 400, marginLeft: 6 }}>
-          “Name &lt;email&gt;” also works · commas are fine
-        </span>
+      <div className="audience-sheet-head">
+        <div>
+          <h4>Add audience contacts</h4>
+          <p>Enter one person per row, or paste Name and Email columns from Excel or Google Sheets.</p>
+        </div>
+        <button type="button" className="btn btn-secondary" onClick={() => addRows(5)} disabled={disabled || busy}>
+          + Add 5 rows
+        </button>
       </div>
 
-      <textarea
-        rows={5}
-        disabled={disabled || busy}
-        value={text}
-        onChange={(e) => { setText(e.target.value); setResult(null); setError(""); }}
-        placeholder={"Rahim Uddin <rahim@travilo.io>\nkarim@ibos.io\nsales@example.com"}
-        style={{
-          width: "100%", fontFamily: "var(--mono, monospace)", fontSize: 12.5,
-          padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)",
-          background: "var(--surface, #fff)", color: "var(--ink-1, #111)", resize: "vertical",
-          lineHeight: 1.7,
-        }}
-      />
-
-      {rows.length > 0 ? (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
-          <span className={chip + " b-neutral"}>{rows.length} address{rows.length !== 1 ? "es" : ""}</span>
-          {counts.valid ? <span className={chip + " b-success"}>{counts.valid} ready</span> : null}
-          {counts.role ? <span className={chip + " b-warn"}>{counts.role} role inbox</span> : null}
-          {counts.disposable ? <span className={chip + " b-warn"}>{counts.disposable} disposable</span> : null}
-          {counts.no_mx ? <span className={chip + " b-danger"}>{counts.no_mx} no mail server</span> : null}
-          {counts.invalid ? <span className={chip + " b-danger"}>{counts.invalid} invalid</span> : null}
-          {counts.unknown ? <span className={chip + " b-neutral"}>{counts.unknown} unverified</span> : null}
-          {parsed.duplicates ? <span className={chip + " b-neutral"}>{parsed.duplicates} duplicate skipped</span> : null}
-        </div>
-      ) : null}
-
-      {/* --- live verification --- */}
-      {rows.length > 0 ? (
-        <div
-          style={{
-            marginTop: 12, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden",
-            background: "var(--surface-2, #fafafa)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              gap: 10, padding: "8px 12px", borderBottom: "1px solid var(--border)", flexWrap: "wrap",
-            }}
-          >
-            <span style={{ fontSize: 12, fontWeight: 700 }}>
-              Email check
-              <span className="hint" style={{ fontWeight: 400, marginLeft: 6 }}>
-                syntax · mail server · disposable · role
-              </span>
-            </span>
-            <span style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              {checking || stillChecking ? (
-                <span style={{ fontSize: 11.5, color: "var(--ink-3)", display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span className="spinner" /> checking mail servers…
-                </span>
-              ) : (
-                <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>checked</span>
-              )}
-              {blockedCount ? (
-                <button
-                  type="button"
-                  onClick={() => removeMatching((r) => r.blocked)}
-                  className="badge b-danger"
-                  style={{ border: "none", cursor: "pointer", fontWeight: 700 }}
-                  title="Remove every address that cannot receive mail"
-                >
-                  Remove {blockedCount} blocked
-                </button>
-              ) : null}
-              {riskyCount ? (
-                <button
-                  type="button"
-                  onClick={() => removeMatching((r) => r.status === "disposable" || r.status === "role")}
-                  className="badge b-warn"
-                  style={{ border: "none", cursor: "pointer", fontWeight: 700 }}
-                  title="Remove disposable and role mailboxes"
-                >
-                  Remove {riskyCount} risky
-                </button>
-              ) : null}
-              {rows.length > 1 ? (
-                <button
-                  type="button"
-                  onClick={() => reset()}
-                  className="badge b-neutral"
-                  style={{ border: "none", cursor: "pointer", fontWeight: 700 }}
-                  title="Clear the whole paste"
-                >
-                  Clear all
-                </button>
-              ) : null}
-            </span>
-          </div>
-
-          <div style={{ maxHeight: 240, overflowY: "auto" }}>
-            {decorated.slice(0, 60).map((r, i) => {
-              const v = verdictOf(r.status);
-              const tone = r.status === "valid" ? "var(--success, #16794C)"
-                : isBlocked(r.status) ? "var(--danger, #B42318)"
-                : r.status === "checking" ? "var(--ink-3)" : "#B45309";
+      <div className="audience-sheet-wrap">
+        <table className="audience-sheet">
+          <thead>
+            <tr>
+              <th className="sheet-row-number">#</th>
+              <th>Contact name</th>
+              <th>Email address <span>required</span></th>
+              <th>Status</th>
+              <th aria-label="Remove row" />
+            </tr>
+          </thead>
+          <tbody>
+            {sheetRows.map((row, index) => {
+              const decoratedRow = decorated.find((item) => item.id === row.id);
               return (
-                <div
-                  key={`${r.email}-${i}`}
-                  style={{
-                    display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center",
-                    padding: "6px 12px", borderBottom: i === Math.min(decorated.length, 60) - 1 ? "none" : "1px solid var(--border)",
-                  }}
-                >
-                  <span className="mono" style={{ fontSize: 11.5, wordBreak: "break-all", flex: 1 }}>
-                    {r.name ? <span style={{ fontFamily: "inherit", color: "var(--ink-3)" }}>{r.name} · </span> : null}
-                    {r.email}
-                  </span>
-                  {r.status !== "checking" ? (
-                    <span style={{ fontSize: 11, whiteSpace: "nowrap", color: tone, fontWeight: 600 }}>
-                      {v.label}{r.reason && r.status !== "valid" ? " - " + r.reason : ""}
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: 11, color: "var(--ink-3)" }}>…</span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeEmail(r.email)}
-                    title="Remove this address from the list"
-                    style={{
-                      flex: "0 0 auto", width: 20, height: 20, lineHeight: "18px", borderRadius: 6,
-                      border: "1px solid var(--border)", background: "#fff", cursor: "pointer",
-                      fontSize: 12, color: "var(--ink-3)", padding: 0,
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
+                <tr key={row.id} className={decoratedRow?.blocked || decoratedRow?.duplicate ? "sheet-row-error" : ""}>
+                  <td className="sheet-row-number">{index + 1}</td>
+                  <td>
+                    <input
+                      value={row.name}
+                      onChange={(event) => updateRow(row.id, "name", event.target.value)}
+                      onPaste={(event) => pasteIntoSheet(event, index)}
+                      placeholder="e.g. Rahim Uddin"
+                      disabled={disabled || busy}
+                      aria-label={`Contact name row ${index + 1}`}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      value={row.email}
+                      onChange={(event) => updateRow(row.id, "email", event.target.value)}
+                      onPaste={(event) => pasteIntoSheet(event, index)}
+                      placeholder="name@company.com"
+                      inputMode="email"
+                      disabled={disabled || busy}
+                      aria-label={`Email address row ${index + 1}`}
+                    />
+                  </td>
+                  <td className="sheet-status">{statusFor(decoratedRow || row)}</td>
+                  <td className="sheet-remove">
+                    <button type="button" onClick={() => removeRow(row.id)} disabled={disabled || busy} title="Remove row">×</button>
+                  </td>
+                </tr>
               );
             })}
-            {decorated.length > 60 ? (
-              <div style={{ padding: "6px 12px", fontSize: 11, color: "var(--ink-3)" }}>
-                +{decorated.length - 60} more shown after adding
-              </div>
-            ) : null}
-          </div>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="audience-sheet-toolbar">
+        <button type="button" className="btn btn-secondary" onClick={() => addRows()} disabled={disabled || busy}>+ Add row</button>
+        <span className="hint">Tip: copy two columns from a spreadsheet, click the first Name cell, then paste.</span>
+      </div>
+
+      {enteredRows.length ? (
+        <div className="audience-sheet-summary">
+          <span className="badge b-neutral">{enteredRows.length} entered</span>
+          {counts.valid ? <span className="badge b-success">{counts.valid} ready</span> : null}
+          {counts.role ? <span className="badge b-warn">{counts.role} role inbox</span> : null}
+          {counts.disposable ? <span className="badge b-warn">{counts.disposable} disposable</span> : null}
+          {blockedCount ? <span className="badge b-danger">{blockedCount} blocked</span> : null}
+          {duplicateCount ? <span className="badge b-warn">{duplicateCount} duplicate</span> : null}
+          {checking || stillChecking ? <span className="sheet-checking"><span className="spinner" /> checking…</span> : null}
+          {blockedCount ? <button type="button" className="sheet-summary-action danger" onClick={() => removeMatching((row) => row.blocked)}>Remove blocked</button> : null}
+          {duplicateCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.duplicate)}>Remove duplicates</button> : null}
+          {riskyCount ? <button type="button" className="sheet-summary-action" onClick={() => removeMatching((row) => row.status === "disposable" || row.status === "role")}>Remove risky</button> : null}
         </div>
       ) : null}
 
       {blockedCount ? (
-        <label
-          style={{
-            display: "flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 12,
-            cursor: disabled ? "default" : "pointer",
-          }}
-        >
-          <input type="checkbox" checked={skipBlocked} onChange={(e) => setSkipBlocked(e.target.checked)} disabled={disabled} />
-          <span>
-            Skip the <b>{blockedCount}</b> address{blockedCount !== 1 ? "es" : ""} that cannot receive mail
-            <span className="hint" style={{ marginLeft: 6 }}>
-              they would only ever bounce, and a send never uses them anyway
-            </span>
-          </span>
+        <label className="audience-skip-blocked">
+          <input type="checkbox" checked={skipBlocked} onChange={(event) => setSkipBlocked(event.target.checked)} disabled={disabled} />
+          Skip {blockedCount} address{blockedCount !== 1 ? "es" : ""} that cannot receive mail
         </label>
       ) : null}
 
-      <div style={{ marginTop: 12 }}>
+      <div style={{ marginTop: 16 }}>
         <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-          Tag these contacts <span className="hint" style={{ fontWeight: 400 }}>(optional, pick any number)</span>
+          Tag these contacts <span className="hint" style={{ fontWeight: 400 }}>(optional)</span>
         </div>
         <TagSelect
           options={tagOptions}
           value={tags}
           onChange={setTags}
-          placeholder="No tags - or choose from existing…"
+          placeholder="No tags, or choose existing tags…"
           allowCreate
           disabled={disabled || busy}
-          hint="Tags let you reuse one list as several segments later."
+          hint="Tags let you reuse one audience as several segments later."
         />
       </div>
 
       {error ? <div className="note n-warn" style={{ marginTop: 12 }}><span><b>Could not add:</b> {error}</span></div> : null}
-
       {result ? (
         <div className="note n-success" style={{ marginTop: 12 }}>
           <span>
             <b>{result.added} contact{result.added !== 1 ? "s" : ""} added</b>
             {result.updated ? ` · ${result.updated} updated` : ""}
-            {result.already_members ? ` · ${result.already_members} already in this list` : ""}
-            {result.invalid && result.invalid.length ? ` · ${result.invalid.length} skipped as unreadable` : ""}
-            {result.verification ? (
-              <>
-                <br />
-                <span style={{ fontSize: 11.5 }}>
-                  Deliverability: {result.verification.counts.valid || 0} good
-                  {result.verification.counts.role ? `, ${result.verification.counts.role} role inbox` : ""}
-                  {result.verification.counts.disposable ? `, ${result.verification.counts.disposable} disposable` : ""}
-                  {result.verification.counts.no_mx ? `, ${result.verification.counts.no_mx} with no mail server` : ""}
-                  {result.verification.counts.invalid ? `, ${result.verification.counts.invalid} invalid` : ""}
-                  {" · "}<b>{result.usable}</b> can receive a send now.
-                </span>
-              </>
-            ) : null}
+            {result.already_members ? ` · ${result.already_members} already in this audience` : ""}
+            {result.invalid?.length ? ` · ${result.invalid.length} unreadable skipped` : ""}
           </span>
         </div>
       ) : null}
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
-        <button
-          className="btn btn-primary"
-          onClick={submit}
-          disabled={disabled || busy || !willAdd.length || stillChecking}
-        >
-          {busy
-            ? "Adding…"
-            : stillChecking
-              ? "Checking…"
-              : `Add ${willAdd.length} contact${willAdd.length !== 1 ? "s" : ""}`}
+      <div className="audience-sheet-actions">
+        <button className="btn btn-primary" type="button" onClick={submit} disabled={disabled || busy || !willAdd.length || stillChecking}>
+          {busy ? "Adding…" : stillChecking ? "Checking…" : `Add ${willAdd.length} contact${willAdd.length !== 1 ? "s" : ""}`}
         </button>
-        {rows.length ? (
-          <button className="btn btn-secondary" onClick={reset} disabled={busy}>Clear</button>
-        ) : null}
-        {blockedCount && skipBlocked ? (
-          <span className="hint">
-            {blockedCount} will not be added - untick the box above to keep them anyway.
-          </span>
-        ) : null}
+        {enteredRows.length ? <button className="btn btn-secondary" type="button" onClick={reset} disabled={busy}>Clear sheet</button> : null}
+        {duplicateCount ? <span className="hint">Duplicate rows are skipped automatically.</span> : null}
       </div>
     </div>
   );
