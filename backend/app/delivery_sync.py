@@ -198,10 +198,11 @@ def sync(db, campaign=None, budget=DEFAULT_BUDGET, refresh=False, dry_run=False)
     return counts
 
 
-def summary(db, campaign_slug):
+def summary(db, campaign_slug, rows=None):
     """Delivered / bounced as the provider reported them for one campaign."""
-    rows = (db.query(models.DeliveryStatus)
-            .filter(models.DeliveryStatus.campaign_slug == campaign_slug).all())
+    if rows is None:
+        rows = (db.query(models.DeliveryStatus)
+                .filter(models.DeliveryStatus.campaign_slug == campaign_slug).all())
     out = {"delivered": 0, "hard_bounce": 0, "soft_bounce": 0, "queued": 0,
            "unknown": 0, "measured": len(rows), "measured_at": ""}
     latest = ""

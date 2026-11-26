@@ -26,12 +26,13 @@ export default function CampaignTable({ campaigns, onChanged }) {
   const [result, setResult] = useState(null);
 
   useEffect(() => {
-    api.audiences().then((rows) => setAudiences(Array.isArray(rows) ? rows : [])).catch(() => setAudiences([]));
-  }, []);
-
-  if (!campaigns || campaigns.length === 0) {
-    return <div className="loading">No sends yet - create one from “+ New Send”.</div>;
-  }
+    if (!starting) return undefined;
+    const controller = new AbortController();
+    api.audiences({ signal: controller.signal })
+      .then(setAudiences)
+      .catch((e) => { if (!controller.signal.aborted) setError(e.message); });
+    return () => controller.abort();
+  }, [starting]);
 
   async function remove(c) {
     const sent = !!c.provider_message_id;
@@ -105,6 +106,10 @@ export default function CampaignTable({ campaigns, onChanged }) {
     }
   }
 
+  if (!campaigns?.length) {
+    return <div className="loading">No sends yet - create one from “+ New Send”.</div>;
+  }
+
   const pct = (v) => (v === null || v === undefined ? "-" : `${v}%`);
   const tagOptions = Object.entries(
     (audiences.find((a) => a.id === audienceId) || {}).tags || {},
@@ -129,7 +134,8 @@ export default function CampaignTable({ campaigns, onChanged }) {
         <tbody>
           {campaigns.map((c) => {
             const r = c.rates || {};
-            const isJourney = (c.emails?.length || 0) > 1;
+            const emailCount = c.email_count ?? c.emails?.length ?? 0;
+            const isJourney = emailCount > 1;
             const enrollment = c.enrollment || {};
             const hasEnrollment = !!enrollment.exists;
             const running = isJourney && (["live", "sending", "paused"].includes(c.status) || hasEnrollment);
@@ -158,7 +164,7 @@ export default function CampaignTable({ campaigns, onChanged }) {
                   <td>
                     {isJourney ? (
                       <span className="badge b-agent" title={c.sequence_type || ""}>
-                        journey · {c.emails.length} emails
+                        journey · {emailCount} emails
                       </span>
                     ) : (
                       <span className="badge b-neutral">one-off</span>
@@ -238,7 +244,7 @@ export default function CampaignTable({ campaigns, onChanged }) {
                   <tr className="row-panel">
                     <td colSpan={7}>
                       <div className="rp-title">
-                        ▶ Start “{c.title}” - a {c.emails.length}-email journey
+                        ▶ Start “{c.title}” - a {emailCount}-email journey
                       </div>
                       <div className="rp-sub">
                         Email 1 is queued immediately and sent safely in the background. Every later step is

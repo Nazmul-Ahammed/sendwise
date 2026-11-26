@@ -39,7 +39,16 @@ async function request(path, options = {}) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    if (error instanceof TypeError) {
+      throw new Error("Could not reach Sendwise. Check your connection and try again.");
+    }
+    throw error;
+  }
   if (res.status === 401) {
     clearToken();
     if (typeof window !== "undefined") window.location.href = "/login";
@@ -53,8 +62,15 @@ async function request(path, options = {}) {
     } catch {
       /* ignore */
     }
+    if ([502, 503, 504].includes(res.status)) {
+      const read = !options.method || options.method === "GET";
+      detail = read
+        ? `Sendwise is temporarily unavailable (HTTP ${res.status}). Try refreshing in a moment.`
+        : `Sendwise could not confirm the request (HTTP ${res.status}). Check the current status before retrying.`;
+    }
     const err = new Error(detail);
     err.status = res.status;
+    err.requestId = res.headers.get("x-request-id");
     throw err;
   }
   return res.json();
@@ -64,6 +80,11 @@ export const api = {
   login: (email, password) => request("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   dashboard: () => request("/api/dashboard"),
   campaigns: () => request("/api/campaigns"),
+  sendsPage: (page, filter, signal) =>
+    request(`/api/campaigns?view=list&page=${page}&status_filter=${encodeURIComponent(filter)}`, { signal }),
+  sendsMetrics: (slugs, signal) => slugs.length
+    ? request(`/api/campaigns/list-metrics?slugs=${encodeURIComponent(slugs.join(","))}`, { signal })
+    : Promise.resolve({}),
   campaign: (slug) => request(`/api/campaigns/${slug}`),
   campaignDeliveryReport: (slug) => request(`/api/campaigns/${slug}/delivery-report`),
   // Realtime per-recipient engagement, filled by the provider webhook.
@@ -105,6 +126,8 @@ export const api = {
   sendcleanSend: (payload) => request("/api/sendclean/send", { method: "POST", body: JSON.stringify(payload) }),
   reports: () => request("/api/reports"),
   refreshDelivery: () => request("/api/delivery/refresh", { method: "POST" }),
+  queueDeliveryRefresh: (signal) => request("/api/delivery/refresh-jobs", { method: "POST", signal }),
+  deliveryRefreshStatus: (id, signal) => request(`/api/delivery/refresh-jobs/${id}`, { signal }),
   // Send the report right now. `to` overrides the configured recipients when given.
   sendReport: (to) => request("/api/reports/send", {
     method: "POST",
@@ -119,15 +142,16 @@ export const api = {
   settings: () => request("/api/settings"),
   patchSetting: (key, value) => request("/api/settings", { method: "PATCH", body: JSON.stringify({ key, value }) }),
   // Saved audiences, contacts and tags. Sendwise owns this; SendClean has no list API.
-  audiences: () => request("/api/audiences"),
+  audiences: ({ signal, view } = {}) => request(view === "list" ? "/api/audiences?view=list" : "/api/audiences", { signal }),
   createAudience: (name, description = "") => request("/api/audiences", { method: "POST", body: JSON.stringify({ name, description }) }),
   updateAudience: (id, payload) => request(`/api/audiences/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteAudience: (id) => request(`/api/audiences/${id}`, { method: "DELETE" }),
-  audienceContacts: (id, tags = "", tagMatch = "any", q = "", page = 0, pageSize = 0) => {
+  audienceContacts: (id, tags = "", tagMatch = "any", q = "", page = 0, pageSize = 0, { signal, includeTags = true } = {}) => {
     const t = Array.isArray(tags) ? tags.join(",") : (tags || "");
     const search = (q || "").trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
     const paging = pageSize > 0 ? `&page=${page || 1}&page_size=${pageSize}` : "";
-    return request(`/api/audiences/${id}/contacts?tags=${encodeURIComponent(t)}&tag_match=${encodeURIComponent(tagMatch)}${search}${paging}`);
+    const inventory = includeTags ? "" : "&include_tags=false";
+    return request(`/api/audiences/${id}/contacts?tags=${encodeURIComponent(t)}&tag_match=${encodeURIComponent(tagMatch)}${search}${paging}${inventory}`, { signal });
   },
   addAudienceContacts: (id, payload) => request(`/api/audiences/${id}/contacts`, { method: "POST", body: JSON.stringify(payload) }),
   removeAudienceContacts: (id, payload) => request(`/api/audiences/${id}/contacts/remove`, { method: "POST", body: JSON.stringify(payload) }),

@@ -508,6 +508,10 @@ table.audience-sheet input::placeholder { color: var(--ink-4); }
 .sheet-summary-action.danger { color: var(--danger); }
 .audience-skip-blocked { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; cursor: pointer; }
 .audience-sheet-actions { margin-top: 14px; }
+.audience-layout { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 850px) {
+  .audience-layout { grid-template-columns: minmax(0, 1fr); }
+}
 .audience-import-tabs {
   display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 14px;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);

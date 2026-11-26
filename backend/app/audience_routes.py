@@ -274,18 +274,20 @@ def _parse_pasted(text, emails):
 
 
 @router.get("/audiences", dependencies=[Depends(require_user)])
-def list_audiences(db: Session = Depends(get_db)):
+def list_audiences(db: Session = Depends(get_db), view: str = ""):
     audiences = (db.query(models.Audience)
                  .filter(models.Audience.deleted_at == "")
                  .order_by(models.Audience.name).all())
     if not audiences:
         return []
+    if view == "list":
+        return [{"id": a.id, "name": a.name, "description": a.description} for a in audiences]
 
     audience_ids = [audience.id for audience in audiences]
-    members = (db.query(models.AudienceMember)
-               .filter(models.AudienceMember.audience_id.in_(audience_ids)).all())
-    contact_ids = {member.contact_id for member in members}
-    contacts = {contact.id: contact for contact in _live_contacts(db, contact_ids)}
+    m, c = models.AudienceMember, models.Contact
+    members = (db.query(m.audience_id, m.tags, c.email, c.status, c.email_status)
+               .join(c, c.id == m.contact_id)
+               .filter(m.audience_id.in_(audience_ids), c.deleted_at == "").all())
     suppressed = _suppressed_email_set(db)
     registered = defaultdict(dict)
     for tag in (db.query(models.AudienceTag)
@@ -302,20 +304,17 @@ def list_audiences(db: Session = Depends(get_db)):
         for audience in audiences
     }
     for member in members:
-        contact = contacts.get(member.contact_id)
-        if not contact:
-            continue
         summary = summaries[member.audience_id]
         summary["members"] += 1
-        status = contact.email_status or "unverified"
-        email = _clean(contact.email)
+        status = member.email_status or "unverified"
+        email = _clean(member.email)
         if status in ("invalid", "no_mx"):
             summary["blocked"] += 1
         if status in ("disposable", "role"):
             summary["risky"] += 1
         if status in ("unverified", "unknown"):
             summary["unchecked"] += 1
-        if contact.status == "subscribed" and email not in suppressed and status not in ("invalid", "no_mx"):
+        if member.status == "subscribed" and email not in suppressed and status not in ("invalid", "no_mx"):
             summary["usable"] += 1
         for tag_name in normalise_tags(member.tags):
             summary["tags"][tag_name] = summary["tags"].get(tag_name, 0) + 1
@@ -502,7 +501,8 @@ def delete_audience_tag(audience_id: int, tag: str, db: Session = Depends(get_db
 
 @router.get("/audiences/{audience_id}/contacts", dependencies=[Depends(require_user)])
 def audience_contacts(audience_id: int, tags: str = "", tag_match: str = "any", q: str = "",
-                      page: int = 0, page_size: int = 0, db: Session = Depends(get_db)):
+                      page: int = 0, page_size: int = 0, db: Session = Depends(get_db),
+                      include_tags: bool = True):
     a = _audience_or_404(db, audience_id)
     base = (db.query(models.Contact, models.AudienceMember)
             .join(models.AudienceMember, models.AudienceMember.contact_id == models.Contact.id)
@@ -577,7 +577,7 @@ def audience_contacts(audience_id: int, tags: str = "", tag_match: str = "any", 
 
     return {"audience": {"id": a.id, "name": a.name}, "count": total,
             "will_receive": receiving, "excluded": total - receiving,
-            "tags": audience_tag_inventory(db, a.id),
+            "tags": audience_tag_inventory(db, a.id) if include_tags else None,
             "tags_applied": want, "tag_match": str(tag_match or "any").lower(),
             "query": needle, "page": current_page, "page_size": size, "pages": pages,
             "contacts": out_rows}

@@ -19,8 +19,16 @@ function tagList(tags) {
 
 export default function AudiencesPage() {
   const [audiences, setAudiences] = useState([]);
+  const [summaries, setSummaries] = useState(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
   const [selected, setSelected] = useState(null);   // audience id
-  const [detail, setDetail] = useState(null);       // {audience, contacts}
+  const [loadedDetail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const selectedRef = useRef(null);
+  const listRequest = useRef(null);
+  const detailRequest = useRef(null);
+  const detail = loadedDetail?.audience?.id === selected ? loadedDetail : null;
   const [tagFilters, setTagFilters] = useState([]);
   const [matchMode, setMatchMode] = useState("any");
   // Search inside the open list. An audience can hold thousands of addresses, so finding
@@ -50,40 +58,89 @@ export default function AudiencesPage() {
   const [contactPageSize, setContactPageSize] = useState(25);
 
   async function loadAudiences(keepId) {
+    const requestedSelection = selectedRef.current;
+    listRequest.current?.abort();
+    const controller = new AbortController();
+    listRequest.current = controller;
+    const { signal } = controller;
+    setListLoading(true);
     try {
-      const [rows] = await Promise.all([
-        api.audiences(),
-      ]);
+      const rows = await api.audiences({ view: "list", signal });
+      if (signal.aborted) return;
       setAudiences(rows);
       setError("");
-      const want = keepId != null ? keepId : (selected ?? (rows.length ? rows[0].id : null));
-      if (want) {
-        setSelected(want);
-        await loadDetail(want, tagFilters, matchMode, memberQuery, contactPage, contactPageSize);
-      } else {
-        setSelected(null);
-        setDetail(null);
+      setListLoading(false);
+      if (selectedRef.current === requestedSelection) {
+        const preferred = keepId ?? requestedSelection;
+        const want = rows.some((row) => row.id === preferred) ? preferred : rows[0]?.id ?? null;
+        if (want === requestedSelection && want != null) {
+          loadDetail(want, tagFilters, matchMode, memberQuery, contactPage, contactPageSize);
+        } else {
+          selectAudience(want);
+        }
       }
+      api.audiences({ signal }).then((stats) => {
+        if (signal.aborted) return;
+        setSummaries(Object.fromEntries(stats.map((row) => [row.id, row])));
+        setSummaryError("");
+      }).catch((e) => { if (!signal.aborted) setSummaryError(e.message); });
     } catch (e) {
-      setError(e.message);
+      if (!signal.aborted) setError(e.message);
+    } finally {
+      if (!signal.aborted) setListLoading(false);
     }
   }
 
   async function loadDetail(id, tags, match, query, page = contactPage, pageSize = contactPageSize) {
     if (!id) return;
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
+    const { signal } = controller;
+    setDetailLoading(true);
     try {
       const q = query === undefined ? memberQuery : query;
       const response = await api.audienceContacts(
-        id, tags || [], match || "any", q || "", page, pageSize,
+        id, tags || [], match || "any", q || "", page, pageSize, { signal, includeTags: false },
       );
+      if (signal.aborted || selectedRef.current !== id) return;
       setDetail(response);
       setContactPage(response.page || 1);
+      setError("");
     } catch (e) {
-      setError(e.message);
+      if (!signal.aborted) setError(e.message);
+    } finally {
+      if (detailRequest.current === controller && !signal.aborted) setDetailLoading(false);
     }
   }
 
-  useEffect(() => { loadAudiences(); /* eslint-disable-next-line */ }, []);
+  function selectAudience(id) {
+    clearTimeout(searchTimer.current);
+    detailRequest.current?.abort();
+    selectedRef.current = id;
+    setSelected(id);
+    setDetail(null);
+    setTagFilters([]);
+    setMatchMode("any");
+    setMemberQuery("");
+    setPicked([]);
+    setTagAdd([]);
+    setTagRemove([]);
+    setVerifySummary(null);
+    setEditing(false);
+    setContactPage(1);
+    if (id != null) loadDetail(id, [], "any", "", 1, contactPageSize);
+    else setDetailLoading(false);
+  }
+
+  useEffect(() => {
+    loadAudiences();
+    return () => {
+      listRequest.current?.abort();
+      detailRequest.current?.abort();
+      clearTimeout(searchTimer.current);
+    };
+  }, []);
 
   function say(msg) {
     setFlash(msg);
@@ -115,7 +172,7 @@ export default function AudiencesPage() {
     try {
       await api.deleteAudience(id);
       say(`“${name}” moved to Trash - restore it any time`);
-      setSelected(null);
+      selectAudience(null);
       setDetail(null);
       await loadAudiences(null);
     } catch (e) {
@@ -327,6 +384,7 @@ export default function AudiencesPage() {
   }
 
   async function applyTagFilters(next, match) {
+    clearTimeout(searchTimer.current);
     const tags = next === undefined ? tagFilters : next;
     const mode = match === undefined ? matchMode : match;
     setTagFilters(tags);
@@ -340,16 +398,19 @@ export default function AudiencesPage() {
   function searchMembers(value) {
     setMemberQuery(value);
     if (searchTimer.current) clearTimeout(searchTimer.current);
+    detailRequest.current?.abort();
+    setDetailLoading(true);
     searchTimer.current = setTimeout(() => {
       setContactPage(1);
       loadDetail(selected, tagFilters, matchMode, value, 1, contactPageSize);
     }, 300);
   }
 
-  const totalMembers = audiences.reduce((n, a) => n + (a.members || 0), 0);
-  const totalUsable = audiences.reduce((n, a) => n + (a.usable || 0), 0);
-  const allTags = [...new Set(audiences.flatMap((a) => Object.keys(a.tags || {})))].sort();
-  const current = audiences.find((a) => a.id === selected) || null;
+  const lists = audiences.map((row) => ({ ...summaries?.[row.id], ...row }));
+  const totalMembers = lists.reduce((n, a) => n + (a.members || 0), 0);
+  const totalUsable = lists.reduce((n, a) => n + (a.usable || 0), 0);
+  const allTags = [...new Set(lists.flatMap((a) => Object.keys(a.tags || {})))].sort();
+  const current = lists.find((a) => a.id === selected) || null;
   // Tags for the OPEN audience only - never borrowed from another list.
   const audienceTagOptions = Object.entries(detail?.tags || current?.tags || {})
     .map(([tag, contacts]) => ({ tag, contacts }));
@@ -395,28 +456,29 @@ export default function AudiencesPage() {
       </div>
 
       {error ? <div className="note n-warn" style={{ marginBottom: 14 }}><span><b>Error:</b> {error}</span></div> : null}
+      {summaryError ? <div className="note n-warn" style={{ marginBottom: 14 }}><span>Audience totals unavailable. {summaryError}</span></div> : null}
       {flash ? <div className="note n-success" style={{ marginBottom: 14 }}><span>{flash}</span></div> : null}
 
       <div className="grid kpis" style={{ marginBottom: 16 }}>
         <div className="kpi">
           <div className="k-label">Audiences</div>
-          <div className="k-value">{audiences.length}</div>
+          <div className="k-value">{listLoading && !audiences.length ? "…" : audiences.length}</div>
           <div className="k-sub">saved lists</div>
         </div>
         <div className="kpi">
           <div className="k-label">Contacts</div>
-          <div className="k-value">{totalMembers}</div>
+          <div className="k-value">{summaries ? totalMembers : "…"}</div>
           <div className="k-sub">across all audiences</div>
         </div>
         <div className="kpi ok">
           <div className="k-label">Usable recipients</div>
-          <div className="k-value">{totalUsable}</div>
+          <div className="k-value">{summaries ? totalUsable : "…"}</div>
           <div className="k-sub">subscribed &amp; not suppressed</div>
         </div>
         <div className="kpi">
           <div className="k-label">Tags</div>
-          <div className="k-value">{allTags.length}</div>
-          <div className="k-sub">{allTags.slice(0, 4).join(", ") || "none yet"}</div>
+          <div className="k-value">{summaries ? allTags.length : "…"}</div>
+          <div className="k-sub">{summaries ? allTags.slice(0, 4).join(", ") || "none yet" : "Loading totals"}</div>
         </div>
       </div>
 
@@ -439,7 +501,9 @@ export default function AudiencesPage() {
         </form>
       ) : null}
 
-      {audiences.length === 0 ? (
+      {listLoading && !audiences.length ? (
+        <div className="card loading" role="status"><span className="spinner" /> Loading audiences…</div>
+      ) : error && !audiences.length ? null : audiences.length === 0 ? (
         <div className="card">
           <div className="note n-info" style={{ margin: 0 }}>
             <span>
@@ -449,13 +513,13 @@ export default function AudiencesPage() {
           </div>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 300px) 1fr", gap: 16, alignItems: "start" }}>
+        <div className="audience-layout">
           <div className="card">
             <div className="card-h"><h3>Your lists</h3><span className="hint">{audiences.length}</span></div>
-            {audiences.map((a) => (
+            {lists.map((a) => (
               <button
                 key={a.id}
-                onClick={async () => { setSelected(a.id); setTagFilters([]); setMatchMode("any"); setPicked([]); setTagAdd([]); setTagRemove([]); setContactPage(1); await loadDetail(a.id, [], "any", "", 1, contactPageSize); }}
+                onClick={() => selectAudience(a.id)}
                 style={{
                   display: "block", width: "100%", textAlign: "left", cursor: "pointer",
                   padding: "10px 12px", marginBottom: 8, borderRadius: 8,
@@ -465,13 +529,13 @@ export default function AudiencesPage() {
               >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
                   <b style={{ fontSize: 13 }}>{a.name}</b>
-                  <span className="badge b-neutral">{a.usable} usable</span>
+                  {a.usable != null ? <span className="badge b-neutral">{a.usable} usable</span> : null}
                 </div>
                 {a.description ? (
                   <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3 }}>{a.description}</div>
                 ) : null}
                 <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4 }}>
-                  {a.members} contact(s)
+                  {a.members != null ? `${a.members} contact(s)` : ""}
                   {Object.keys(a.tags || {}).length
                     ? ` · ${Object.keys(a.tags).map((t) => `${t}(${a.tags[t]})`).join(" ")}`
                     : ""}
@@ -523,8 +587,8 @@ export default function AudiencesPage() {
                             ) : null}
                           </div>
                           <div className="inline">
-                            <span className="badge b-neutral">{current.members} contact(s)</span>
-                            <span className="badge b-success">{current.usable} usable</span>
+                            {current.members != null ? <span className="badge b-neutral">{current.members} contact(s)</span> : null}
+                            {current.usable != null ? <span className="badge b-success">{current.usable} usable</span> : null}
                             {current.blocked ? (
                               <span className="badge b-danger" title="Invalid syntax or no mail server - never sent to">
                                 {current.blocked} blocked
@@ -565,6 +629,7 @@ export default function AudiencesPage() {
                     </div>
                   ) : null}
                     <AddContacts
+                      key={current.id}
                       audienceId={current.id}
                       tagOptions={audienceTagOptions}
                         disabled={busy}
@@ -643,7 +708,7 @@ export default function AudiencesPage() {
                   <div className="card-h">
                     <h3>Members</h3>
                     <span className="hint">
-                      {detail ? `${detail.count} contact(s)` : "-"}
+                      {detailLoading ? "Updating…" : detail ? `${detail.count} contact(s)` : "-"}
                       {tagFilters.length ? ` · ${tagFilters.join(matchMode === "all" ? " AND " : " OR ")}` : ""}
                     </span>
                   </div>
@@ -660,7 +725,7 @@ export default function AudiencesPage() {
                     />
                     {memberQuery ? (
                       <div className="hint" style={{ marginTop: 6 }}>
-                        {detail ? `${detail.count} match(es) for "${memberQuery}"` : "searching..."} -{" "}
+                        {detail && !detailLoading ? `${detail.count} match(es) for "${memberQuery}"` : "searching..."} -{" "}
                         <a href="#" onClick={(e) => { e.preventDefault(); searchMembers(""); }}>clear</a>
                       </div>
                     ) : null}
@@ -682,7 +747,9 @@ export default function AudiencesPage() {
                   </div>
 
                     {!detail || detail.contacts.length === 0 ? (
-                      <div className="hint">No contacts here yet - paste some addresses above.</div>
+                      <div className="hint" role="status">
+                        {detailLoading ? "Loading contacts…" : detail ? "No contacts match this view." : "Contacts unavailable."}
+                      </div>
                     ) : (
                       <>
                         {/* bulk tag actions on the selected contacts */}

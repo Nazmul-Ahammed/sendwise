@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 
 function ago(iso) {
@@ -19,7 +19,7 @@ function ago(iso) {
 /**
  * "Update now" button with the last-updated time attached to it.
  *
- * Default action refreshes every tracked send (`POST /api/delivery/refresh`).
+ * Default action queues a delivery refresh and polls its status.
  * Pass `onRefresh` to override for a single scope (a campaign, a report);
  * `onDone` runs after a successful refresh so the page can reload.
  */
@@ -32,24 +32,45 @@ export default function RefreshRatesButton({
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
+  const request = useRef(null);
   const [, tick] = useState(0);
 
   // Keep "12s ago" honest without a page reload.
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 30000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      request.current?.abort();
+    };
   }, []);
 
   async function run() {
+    const controller = new AbortController();
+    request.current = controller;
+    const { signal } = controller;
     setBusy(true);
     setErr("");
+    setNotice("");
     try {
-      const res = onRefresh ? await onRefresh() : await api.refreshDelivery();
-      if (onDone) await onDone(res);
+      let result = onRefresh ? await onRefresh() : await api.queueDeliveryRefresh(signal);
+      if (!onRefresh) {
+        const deadline = Date.now() + 180000;
+        while (!signal.aborted && Date.now() < deadline && ["queued", "running"].includes(result.status)) {
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          if (signal.aborted) return;
+          result = await api.deliveryRefreshStatus(result.id, signal);
+        }
+        if (result.status === "failed") throw new Error(result.detail || "Could not update metrics.");
+        if (["queued", "running"].includes(result.status)) {
+          setNotice("Refresh is still running in Jobs.");
+        }
+      }
+      if (!signal.aborted && onDone) await onDone(result);
     } catch (e) {
-      setErr(e.message);
+      if (!signal.aborted) setErr(e.message);
     } finally {
-      setBusy(false);
+      if (!signal.aborted) setBusy(false);
     }
   }
 
@@ -69,7 +90,7 @@ export default function RefreshRatesButton({
           textOverflow: "ellipsis",
         }}
       >
-        {err ? `⚠ ${err}` : `updated ${ago(updatedAt)}`}
+        {err ? `⚠ ${err}` : notice || `updated ${ago(updatedAt)}`}
       </span>
       <button
         className={`btn btn-secondary${compact ? " btn-sm" : ""}`}

@@ -8,6 +8,7 @@ import smtplib
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -19,7 +20,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text as _sql_text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from . import models
 from . import open_signal
@@ -64,7 +65,7 @@ def health():
 
 
 # ---------- helpers ----------
-def _engagement_summary(db, c):
+def _engagement_summary(db, c, prefetched=None):
     """Rates built from `engagement_events`, for sends the provider ledger cannot cover.
 
     A sequence send records each email against an enrollment, so `campaign.delivery_json`
@@ -79,7 +80,9 @@ def _engagement_summary(db, c):
     if db is None:
         return None
 
-    sent_index = _campaign_send_index(db, c)
+    enrollments, prefetched_events, delivery_rows = prefetched or (None, None, None)
+    sent_index = (_campaign_send_index(db, c) if enrollments is None else
+                  _campaign_send_index(db, c, enrollments))
     if not sent_index:
         return None
 
@@ -87,8 +90,8 @@ def _engagement_summary(db, c):
     if not recipients:
         return None
 
-    events = (db.query(models.EngagementEvent)
-                .filter(models.EngagementEvent.campaign_slug == c.slug).all())
+    events = prefetched_events if prefetched_events is not None else (
+        db.query(models.EngagementEvent).filter(models.EngagementEvent.campaign_slug == c.slug).all())
     if not events:
         return None
 
@@ -126,15 +129,16 @@ def _engagement_summary(db, c):
     # trust for Delivered / Bounced: the webhook never arrived, so counting our own
     # "we sent it" as delivery was the only alternative and it is not the same claim.
     from . import delivery_sync as dstat
-    measured = dstat.summary(db, c.slug)
+    measured = (dstat.summary(db, c.slug) if delivery_rows is None else
+                dstat.summary(db, c.slug, rows=delivery_rows))
     bounced_here = measured["bounced"]
     if measured["measured"]:
         delivered_to = delivered_to | {
             r.email for r in
-            (db.query(models.DeliveryStatus)
+            (delivery_rows if delivery_rows is not None else db.query(models.DeliveryStatus)
              .filter(models.DeliveryStatus.campaign_slug == c.slug,
                      models.DeliveryStatus.status == "delivered").all())
-            if getattr(r, "email", "")}
+            if r.email and r.status == "delivered"}
 
 
     # Delivery confirmation is unreliable here: SendClean's webhook registers and answers
@@ -181,7 +185,7 @@ def _engagement_summary(db, c):
     }
 
 
-def _campaign_rates(c, db=None):
+def _campaign_rates(c, db=None, prefetched=None):
     """Open/click/delivery rates.
 
     Prefers the live SendClean delivery-report summary. Falls back to the realtime event
@@ -192,7 +196,7 @@ def _campaign_rates(c, db=None):
     summary = (c.delivery_json or {}).get("summary")
     if summary:
         return summary
-    live = _engagement_summary(db, c)
+    live = _engagement_summary(db, c) if prefetched is None else _engagement_summary(db, c, prefetched)
     if live:
         return live
     if c.open_rate is not None or c.click_rate is not None or c.delivery_rate is not None:
@@ -222,6 +226,10 @@ def _enrollment_summary(db, campaign_slug):
                COALESCE(SUM(sends), 0) AS sends
         FROM sequence_enrollments WHERE campaign_slug = :slug
     """), {"slug": campaign_slug}).mappings().first()
+    return _enrollment_counts(row)
+
+
+def _enrollment_counts(row):
     data = dict(row or {})
     return {"exists": bool(data.get("enrolled")),
             "enrolled": int(data.get("enrolled") or 0),
@@ -231,8 +239,7 @@ def _enrollment_summary(db, campaign_slug):
             "sends": int(data.get("sends") or 0)}
 
 
-def _campaign_dict(c: models.Campaign, db=None):
-    enrollment = _enrollment_summary(db, c.slug)
+def _campaign_status(c, enrollment):
     # The enrollment ledger is the sending source of truth. A worker can finish after
     # the original HTTP request has timed out or restarted, leaving the old campaign
     # label on "approved" even though mail went out. Derive what the UI shows from the
@@ -243,11 +250,16 @@ def _campaign_dict(c: models.Campaign, db=None):
             effective_status = "sending"
         elif enrollment["sends"]:
             effective_status = "live"
+    return effective_status
+
+
+def _campaign_dict(c: models.Campaign, db=None):
+    enrollment = _enrollment_summary(db, c.slug)
     return {
         "id": c.id,
         "slug": c.slug,
         "title": c.title,
-        "status": effective_status,
+        "status": _campaign_status(c, enrollment),
         "persisted_status": c.status,
         "audience_name": c.audience_name,
         "audience_count": c.audience_count,
@@ -504,6 +516,56 @@ def refresh_delivery(db: Session = Depends(get_db)):
             "updated_at": totals.get("updated_at")}
 
 
+def _run_delivery_refresh(job_id):
+    from .db import SessionLocal
+
+    with SessionLocal() as db:
+        job = db.get(models.Job, job_id)
+        if job is None:
+            return
+        job.status = "running"
+        db.commit()
+        try:
+            result = refresh_delivery(db)
+            job.status = "failed" if result["failed"] else "done"
+            job.detail = f"{result['refreshed']} campaign(s) refreshed, {result['failed']} failed"
+        except Exception:
+            db.rollback()
+            job.status = "failed"
+            job.detail = "Delivery metrics could not be refreshed. Try again."
+        db.commit()
+
+
+@router.post("/delivery/refresh-jobs", status_code=202, dependencies=[Depends(require_user)])
+def queue_delivery_refresh(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    # Serialize check/insert across workers without locking during provider I/O.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(_sql_text("SELECT pg_advisory_xact_lock(719436108)"))
+    cutoff = (datetime.fromisoformat(stamp()) - timedelta(minutes=15)).isoformat(timespec="seconds")
+    job = db.query(models.Job).filter(
+        models.Job.job_type == "delivery_refresh", models.Job.status.in_(("queued", "running")),
+        models.Job.created_at >= cutoff,
+    ).order_by(models.Job.id.desc()).first()
+    if job:
+        return {"id": job.id, "status": job.status}
+    job = models.Job(job_type="delivery_refresh", title="Refresh delivery rates",
+                     status="queued", detail="", created_at=stamp())
+    db.add(job)
+    db.flush()
+    job_id = job.id
+    db.commit()
+    background_tasks.add_task(_run_delivery_refresh, job_id)
+    return {"id": job_id, "status": "queued"}
+
+
+@router.get("/delivery/refresh-jobs/{job_id}", dependencies=[Depends(require_user)])
+def delivery_refresh_status(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(models.Job, job_id)
+    if job is None or job.job_type != "delivery_refresh":
+        raise HTTPException(status_code=404, detail="Delivery refresh not found")
+    return {"id": job.id, "status": job.status, "detail": job.detail}
+
+
 def _rate_kpi(label, value, target, icon, lower_is_better=False):
     if value is None:
         return {"label": label, "value": "-", "sub": "no sends tracked yet", "status": "pending", "icon": icon}
@@ -640,9 +702,96 @@ class CampaignCreate(BaseModel):
 
 
 @router.get("/campaigns", dependencies=[Depends(require_user)])
-def list_campaigns(db: Session = Depends(get_db)):
+def list_campaigns(db: Session = Depends(get_db), view: str = "", page: int = 1,
+                   status_filter: Literal["all", "live", "draft"] = "all"):
+    if view == "list":
+        return _sends_page(db, page, status_filter)
     rows = db.query(models.Campaign).order_by(models.Campaign.id.desc()).all()
     return [_campaign_dict(c, db) for c in rows]
+
+
+def _sends_page(db, page, status_filter):
+    c = models.Campaign
+    e = models.SequenceEnrollment
+    from sqlalchemy import func
+
+    # Read only the fields the list uses. JSON lengths are computed in the DB,
+    # so draft HTML, recipient addresses and enrollment history never leave it.
+    if db.get_bind().dialect.name == "postgresql":
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import JSONB
+        def array_length(value):
+            value = cast(value, JSONB)
+            from sqlalchemy import case
+            return case((func.jsonb_typeof(value) == "array", func.jsonb_array_length(value)), else_=0)
+    else:
+        def array_length(value):
+            return func.coalesce(func.json_array_length(value), 0)
+
+    rows = db.query(
+        c.slug, c.title, c.status, c.audience_count, c.sequence_type, c.sequence_slug,
+        c.provider_message_id, array_length(c.emails_json).label("email_count"),
+        array_length(c.delivery_json["recipients"]).label("sent_count"),
+    ).order_by(c.id.desc()).all()
+    summaries = {
+        row.campaign_slug: _enrollment_counts(row._mapping)
+        for row in db.query(
+            e.campaign_slug, func.count().label("enrolled"),
+            func.count().filter(e.status == "active").label("active"),
+            func.count().filter(e.status == "failed").label("failed"),
+            func.count().filter(e.status == "active", func.coalesce(e.current_ref, "") == "").label("pending_initial"),
+            func.sum(e.sends).label("sends"),
+        ).filter(e.campaign_slug.in_([row.slug for row in rows])).group_by(e.campaign_slug)
+    }
+    counts = {"all": len(rows), "live": 0, "draft": 0}
+    items = []
+    has_sending = False
+    for row in rows:
+        enrollment = summaries.get(row.slug) or _enrollment_counts(None)
+        status = _campaign_status(row, enrollment)
+        has_sending |= status == "sending"
+        group = ("live" if status in ("live", "sending", "paused") else
+                 "draft" if status in ("draft", "ready", "approved", "scheduled") else None)
+        if group:
+            counts[group] += 1
+        if status_filter == "all" or group == status_filter:
+            items.append({**dict(row._mapping), "status": status, "enrollment": enrollment,
+                          "delivery": {"sent_count": row.sent_count}})
+    size = 25
+    pages = max(1, (len(items) + size - 1) // size)
+    page = max(1, min(page, pages))
+    start = (page - 1) * size
+    return {"items": items[start:start + size], "counts": counts, "page": page,
+            "pages": pages, "has_sending": has_sending}
+
+
+@router.get("/campaigns/list-metrics", dependencies=[Depends(require_user)])
+def sends_list_metrics(slugs: str = "", db: Session = Depends(get_db)):
+    keys = list(dict.fromkeys(value.strip() for value in slugs.split(",") if value.strip()))
+    if not keys:
+        return {}
+    if len(keys) > 25:
+        raise HTTPException(status_code=400, detail="Choose up to 25 campaigns")
+    c = models.Campaign
+    rows = (db.query(c).options(load_only(c.slug, c.delivery_json, c.open_rate,
+                                         c.click_rate, c.delivery_rate))
+            .filter(c.slug.in_(keys)).all())
+    tracking_slugs = [row.slug for row in rows if not (row.delivery_json or {}).get("summary")]
+
+    def by_slug(query, slug_col):
+        grouped = defaultdict(list)
+        for entry in query.filter(slug_col.in_(tracking_slugs)):
+            grouped[entry.campaign_slug].append(entry)
+        return grouped
+
+    e, event, delivery = models.SequenceEnrollment, models.EngagementEvent, models.DeliveryStatus
+    enrollments = by_slug(db.query(e.campaign_slug, e.email, e.history_json), e.campaign_slug)
+    events = by_slug(db.query(event.campaign_slug, event.email, event.event_type, event.is_machine),
+                     event.campaign_slug)
+    deliveries = by_slug(db.query(delivery.campaign_slug, delivery.email, delivery.status, delivery.checked_at),
+                         delivery.campaign_slug)
+    return {row.slug: _campaign_rates(row, db, (enrollments[row.slug], events[row.slug], deliveries[row.slug]))
+            for row in rows}
 
 
 def _sendclean_send(db, c, email_row, recipients, html, x_unique_id, tracking_domain=""):
@@ -2259,7 +2408,7 @@ def _emails_with(events, kind, machine=None):
     return out
 
 
-def _campaign_send_index(db, campaign):
+def _campaign_send_index(db, campaign, enrollments=None):
     """Every email this campaign sent, as {x_unique_id: (email, ref)}.
 
     A sequence send has one entry per email per recipient; a one-off send has a single
@@ -2267,8 +2416,9 @@ def _campaign_send_index(db, campaign):
     events, which is what ties an event to a person and an email.
     """
     index = {}
-    enrollments = (db.query(models.SequenceEnrollment)
-                     .filter(models.SequenceEnrollment.campaign_slug == campaign.slug).all())
+    if enrollments is None:
+        enrollments = (db.query(models.SequenceEnrollment)
+                         .filter(models.SequenceEnrollment.campaign_slug == campaign.slug).all())
     for e in enrollments:
         hist = e.history_json if isinstance(e.history_json, list) else json.loads(e.history_json or "[]")
         for step in hist:

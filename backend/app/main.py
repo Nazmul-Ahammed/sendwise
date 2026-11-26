@@ -1,4 +1,7 @@
+import logging
 import os
+from time import perf_counter
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -373,6 +376,49 @@ app = FastAPI(
     version="1.0.0",
 )
 
+class RequestDiagnosticsMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        request_id = uuid4().hex[:16]
+        started = perf_counter()
+        status = 500
+        response_elapsed = None
+
+        async def send_with_diagnostics(message):
+            nonlocal status, response_elapsed
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                elapsed_ms = (perf_counter() - started) * 1000
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"x-request-id", request_id.encode()),
+                    (b"server-timing", f"app;dur={elapsed_ms:.1f}".encode()),
+                ]
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_elapsed = (perf_counter() - started) * 1000
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_diagnostics)
+        finally:
+            elapsed_ms = response_elapsed if response_elapsed is not None else (perf_counter() - started) * 1000
+            route = getattr(scope.get("route"), "path", "/api/<unmatched>")
+            if (status >= 500 or elapsed_ms >= 1000 or
+                    route.startswith(("/api/campaigns", "/api/audiences", "/api/cron/"))):
+                logging.getLogger("uvicorn.error").info(
+                    "api_request id=%s method=%s route=%s status=%s duration_ms=%.1f",
+                    request_id, scope["method"], route, status, elapsed_ms,
+                )
+
+
+app.add_middleware(RequestDiagnosticsMiddleware)
+
 # CORS: if CORS_ORIGINS set (comma-separated) use it with credentials; otherwise allow all origins
 # (token-based auth - no cookies - so wildcard is safe on the deployed API).
 _cors = os.getenv("CORS_ORIGINS", "")
@@ -383,6 +429,7 @@ if _cors:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID", "Server-Timing"],
     )
 else:
     app.add_middleware(
@@ -391,6 +438,7 @@ else:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID", "Server-Timing"],
     )
 
 app.include_router(router)
